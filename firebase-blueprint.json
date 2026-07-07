@@ -1,0 +1,182 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "Information about a registered member (Customer, Affiliate, Admin, etc.)",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth user unique ID" },
+        "memberId": { "type": "string", "description": "Unique, company-assigned ID like IAM-1000123" },
+        "fullName": { "type": "string", "description": "Full legal name" },
+        "email": { "type": "string", "format": "email", "description": "Email address" },
+        "mobileNumber": { "type": "string", "description": "Mobile contact number" },
+        "role": { "type": "string", "enum": ["Super Admin", "Admin", "Customer", "Affiliate", "City Distributor", "Regional Distributor"], "description": "Assigned platform role" },
+        "accountType": { "type": "string", "enum": ["Customer", "Affiliate"], "description": "Category selected at registration" },
+        "sponsorCode": { "type": "string", "description": "Unique, shareable sponsor link/code" },
+        "referredBy": { "type": "string", "description": "The sponsorCode of the referring distributor" },
+        "status": { "type": "string", "enum": ["Active", "Inactive", "Completed"], "description": "Business cycle or membership status" },
+        "kycStatus": { "type": "string", "enum": ["Unverified", "Pending", "Verified"], "description": "KYC documentation status" },
+        "packageLevel": { "type": "string", "enum": ["Bronze", "Silver", "Gold", "Platinum", "Diamond", "None"], "description": "Current active product package" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "memberId", "fullName", "email", "role", "accountType", "sponsorCode", "status", "kycStatus", "packageLevel"]
+    },
+    "Wallet": {
+      "title": "User Digital Wallet",
+      "description": "Usable and commission balances inside the I AM CHOSEN ecosystem",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "chosenWalletBalance": { "type": "number", "description": "Stores available Chosen Credits (CC)" },
+        "commissionWalletBalance": { "type": "number", "description": "Temporarily stores direct, unilevel, leadership, infinity bonuses" },
+        "marketingSupportWalletBalance": { "type": "number", "description": "Stores daily Marketing Support Allocation earnings" },
+        "rewardWalletBalance": { "type": "number", "description": "Stores star, travel, and recognition incentives" },
+        "cashWalletStatus": { "type": "string", "description": "Current cashout accessibility status" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "chosenWalletBalance", "commissionWalletBalance", "marketingSupportWalletBalance", "rewardWalletBalance"]
+    },
+    "BusinessCycle": {
+      "title": "Business Cycle Status",
+      "description": "Earning cycle and capacity limits attached to Affiliate package level",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "packageLevel": { "type": "string" },
+        "packageValueCC": { "type": "number" },
+        "earningsCapCC": { "type": "number", "description": "2.5x package value" },
+        "currentQualifiedEarningsCC": { "type": "number", "description": "Accumulated earnings counted toward cap" },
+        "remainingCapacityCC": { "type": "number", "description": "earningsCap - currentQualifiedEarnings" },
+        "status": { "type": "string", "enum": ["Active", "Completed", "None"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "packageLevel", "packageValueCC", "earningsCapCC", "currentQualifiedEarningsCC", "remainingCapacityCC", "status"]
+    },
+    "WalletTransaction": {
+      "title": "Wallet Transaction Ledger",
+      "description": "Transaction details for credits and debits on wallets",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "uid": { "type": "string" },
+        "amount": { "type": "number" },
+        "type": { "type": "string", "enum": ["CREDIT", "DEBIT"] },
+        "walletType": { "type": "string" },
+        "description": { "type": "string" },
+        "status": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "uid", "amount", "type", "walletType", "status", "createdAt"]
+    },
+    "CashoutRequest": {
+      "title": "Cashout Request Detail",
+      "description": "Submitted cashout request properties",
+      "type": "object",
+      "properties": {
+        "requestId": { "type": "string" },
+        "uid": { "type": "string" },
+        "memberId": { "type": "string" },
+        "fullName": { "type": "string" },
+        "amountCC": { "type": "number" },
+        "grossPhp": { "type": "number" },
+        "withholdingTax": { "type": "number" },
+        "adminFeePhp": { "type": "number" },
+        "netPhp": { "type": "number" },
+        "payoutChannel": { "type": "string" },
+        "destinationDetails": { "type": "string" },
+        "status": { "type": "string" },
+        "requestDate": { "type": "string", "format": "date-time" },
+        "expectedReleaseDate": { "type": "string", "format": "date-time" }
+      },
+      "required": ["requestId", "uid", "memberId", "fullName", "amountCC", "grossPhp", "withholdingTax", "adminFeePhp", "netPhp", "payoutChannel", "destinationDetails", "status", "requestDate"]
+    },
+    "AuditLog": {
+      "title": "Audit Log Record",
+      "description": "System event record for security auditing",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "actorUid": { "type": "string" },
+        "actorEmail": { "type": "string" },
+        "action": { "type": "string" },
+        "details": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "actorUid", "action", "timestamp"]
+    },
+    "Order": {
+      "title": "Product Order Purchase Record",
+      "description": "Information about a product purchased by a customer using CC",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "uid": { "type": "string" },
+        "productName": { "type": "string" },
+        "priceCC": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "uid", "productName", "priceCC", "createdAt"]
+    },
+    "CashinRequest": {
+      "title": "Cash-In Request Record",
+      "description": "Request submitted by users to top up their wallet with CC",
+      "type": "object",
+      "properties": {
+        "requestId": { "type": "string" },
+        "uid": { "type": "string" },
+        "memberId": { "type": "string" },
+        "fullName": { "type": "string" },
+        "amountCC": { "type": "number" },
+        "amountPhp": { "type": "number" },
+        "paymentChannel": { "type": "string" },
+        "referenceNumber": { "type": "string" },
+        "accountName": { "type": "string" },
+        "accountNumber": { "type": "string" },
+        "status": { "type": "string" },
+        "requestDate": { "type": "string", "format": "date-time" },
+        "approvedAt": { "type": "string", "format": "date-time" },
+        "approvedBy": { "type": "string" },
+        "declinedAt": { "type": "string", "format": "date-time" },
+        "declinedBy": { "type": "string" }
+      },
+      "required": ["requestId", "uid", "memberId", "fullName", "amountCC", "amountPhp", "paymentChannel", "referenceNumber", "accountName", "accountNumber", "status", "requestDate"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Stores individual member profile detail documents"
+    },
+    "/wallets/{userId}": {
+      "schema": "Wallet",
+      "description": "Digital wallet accounts containing balance structures for each user"
+    },
+    "/business_cycles/{userId}": {
+      "schema": "BusinessCycle",
+      "description": "Maintains 2.5x earning cap tracker details for affiliates"
+    },
+    "/wallet_transactions/{txId}": {
+      "schema": "WalletTransaction",
+      "description": "Maintains individual wallet transaction records"
+    },
+    "/cashout_requests/{requestId}": {
+      "schema": "CashoutRequest",
+      "description": "Maintains user submitted withdrawal requests"
+    },
+    "/cashin_requests/{requestId}": {
+      "schema": "CashinRequest",
+      "description": "Maintains user submitted cash-in requests"
+    },
+    "/orders/{orderId}": {
+      "schema": "Order",
+      "description": "Stores customer product purchase transaction details"
+    },
+    "/audit_logs/{logId}": {
+      "schema": "AuditLog",
+      "description": "Tracks profile edits, role modifications, and authentication transactions"
+    }
+  }
+}

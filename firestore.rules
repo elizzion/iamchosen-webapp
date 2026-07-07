@@ -1,0 +1,168 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // --- GLOBAL SAFETY NET ---
+    // Deny all reads/writes to undefined collections by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+    
+    // --- GLOBAL HELPER FUNCTIONS ---
+    
+    // Check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Check if requester is Admin or Super Admin based on their user document
+    function isAdmin() {
+      return isAuthenticated() && 
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        (
+          'role' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data &&
+          (
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Admin' || 
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Super Admin'
+          )
+        );
+    }
+
+    // Check if requester has a specific permission (or is Super Admin)
+    function hasPermission(permissionName) {
+      return isAuthenticated() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        (
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Super Admin' ||
+          (
+            'permissions' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data &&
+            permissionName in get(/databases/$(database)/documents/users/$(request.auth.uid)).data.permissions &&
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.permissions[permissionName] == true
+          ) ||
+          (
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Admin' &&
+            permissionName != 'systemSettings' &&
+            permissionName != 'manageRoles'
+          )
+        );
+    }
+
+    // --- TEST CONNECTION COLLECTION ---
+    // Public connection tests when the app boots
+    match /test/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // --- USERS COLLECTION ---
+    match /users/{userId} {
+      // 1. Authenticated users can get user documents (e.g. to fetch sponsor or member details)
+      allow get: if isAuthenticated();
+
+      // 2. Admins with manageMembers can list all users. Anyone can query with limit(1) to verify a sponsor code (even guests during registration).
+      allow list: if hasPermission('manageMembers') || (isAuthenticated() && hasPermission('manageRoles')) || request.query.limit == 1;
+      
+      // Anyone can create a user doc during registration (either self or by sponsor)
+      allow create: if isAuthenticated() && (request.auth.uid == userId || request.resource.data.referredBy == request.auth.uid || hasPermission('manageMembers'));
+
+      // Update rules: Allow users to update their own profile, or if has permissions
+      allow update: if isAuthenticated() && (request.auth.uid == userId || hasPermission('manageMembers') || hasPermission('manageRoles'));
+
+      // Only authorized Admins can delete profiles
+      allow delete: if hasPermission('manageMembers') || hasPermission('manageRoles');
+    }
+
+    // --- WALLETS COLLECTION ---
+    match /wallets/{userId} {
+      allow get: if isAuthenticated() && (request.auth.uid == userId || hasPermission('manageWallets'));
+      allow list: if isAuthenticated() && hasPermission('manageWallets');
+      
+      allow create: if isAuthenticated() && (request.auth.uid == userId || request.resource.data.uid == userId || hasPermission('manageWallets'));
+      
+      // Allow user updates (for simulated commissions/cashouts) and admin updates
+      allow update: if isAuthenticated() && (request.auth.uid == userId || hasPermission('manageWallets'));
+      
+      allow delete: if hasPermission('manageWallets');
+    }
+
+    // --- BUSINESS CYCLES COLLECTION ---
+    match /business_cycles/{userId} {
+      allow get: if isAuthenticated() && (request.auth.uid == userId || hasPermission('manageMembers'));
+      allow list: if isAuthenticated() && hasPermission('manageMembers');
+      
+      allow create: if isAuthenticated() && (request.auth.uid == userId || request.resource.data.uid == userId || hasPermission('manageMembers'));
+      
+      // Allow user updates (for simulated cycles) and admin updates
+      allow update: if isAuthenticated() && (request.auth.uid == userId || hasPermission('manageMembers'));
+      
+      allow delete: if hasPermission('manageMembers');
+    }
+
+    // --- WALLET TRANSACTIONS COLLECTION ---
+    match /wallet_transactions/{txId} {
+      allow get: if isAuthenticated() && (resource.data.uid == request.auth.uid || hasPermission('manageWallets'));
+      allow list: if isAuthenticated() && (hasPermission('manageWallets') || resource.data.uid == request.auth.uid);
+      
+      allow create: if isAuthenticated();
+      allow update, delete: if hasPermission('manageWallets');
+    }
+
+    // --- CASHOUT REQUESTS COLLECTION ---
+    match /cashout_requests/{requestId} {
+      allow get: if isAuthenticated() && (resource.data.uid == request.auth.uid || hasPermission('approveCashOut'));
+      allow list: if isAuthenticated() && (hasPermission('approveCashOut') || resource.data.uid == request.auth.uid);
+      
+      allow create: if isAuthenticated() && request.resource.data.uid == request.auth.uid;
+      allow update, delete: if hasPermission('approveCashOut');
+    }
+
+    // --- AUDIT LOGS COLLECTION ---
+    match /audit_logs/{logId} {
+      allow read: if hasPermission('viewAuditLogs');
+      allow create: if true; // Allow system, guest, and authenticated operations to log events
+      allow update, delete: if false;
+    }
+
+    // --- SYSTEM COLLECTION (INVENTORY ETC) ---
+    match /system/{docId} {
+      allow read: if isAuthenticated();
+      allow write: if hasPermission('manageProducts') || hasPermission('manageInventory') || hasPermission('systemSettings');
+    }
+
+    // --- SYSTEM CONFIG COLLECTION (CC SETTINGS ETC) ---
+    match /system_config/{docId} {
+      allow read: if true; // Everyone can read CC conversion settings (needed for public landing page & dashboards)
+      allow write: if hasPermission('systemSettings');
+    }
+
+    // --- ORDERS COLLECTION ---
+    match /orders/{orderId} {
+      allow get: if isAuthenticated() && (resource.data.uid == request.auth.uid || hasPermission('manageProducts'));
+      allow list: if isAuthenticated() && (resource.data.uid == request.auth.uid || hasPermission('manageProducts'));
+      allow create: if isAuthenticated() && request.resource.data.uid == request.auth.uid;
+      allow update, delete: if hasPermission('manageProducts');
+    }
+
+    // --- CASH-IN REQUESTS COLLECTION ---
+    match /cashin_requests/{requestId} {
+      allow get: if isAuthenticated() && (resource.data.uid == request.auth.uid || hasPermission('manageWallets'));
+      allow list: if isAuthenticated() && (hasPermission('manageWallets') || resource.data.uid == request.auth.uid);
+      allow create: if isAuthenticated() && request.resource.data.uid == request.auth.uid;
+      allow update, delete: if hasPermission('manageWallets');
+    }
+
+    // --- CUSTOMER PACKAGE REQUESTS COLLECTION ---
+    match /customer_package_requests/{requestId} {
+      allow get, list: if isAuthenticated() && (resource.data.uid == request.auth.uid || hasPermission('manageMembers'));
+      allow create: if isAuthenticated() && request.resource.data.uid == request.auth.uid;
+      allow update, delete: if isAuthenticated() && hasPermission('manageMembers');
+    }
+
+    // --- AFFILIATE ACTIVATION REQUESTS COLLECTION ---
+    match /affiliate_activation_requests/{requestId} {
+      allow get, list: if isAuthenticated() && (resource.data.uid == request.auth.uid || hasPermission('manageMembers'));
+      allow create: if isAuthenticated() && request.resource.data.uid == request.auth.uid;
+      allow update, delete: if isAuthenticated() && hasPermission('manageMembers');
+    }
+  }
+}
