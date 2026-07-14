@@ -1,0 +1,58 @@
+@font-face {
+  font-family: 'Geist';
+  src: url('../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2') format('woff2-variations'),
+       url('../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.ttf') format('truetype');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Geist", sans-serif;
+  --font-mono: "Geist", sans-serif;
+  --font-serif: "Geist", sans-serif;
+  --color-gold: #D4AF37;
+  --color-gold-muted: #967B2F;
+  --color-dark-surface: #0A0A0A;
+  --color-dark-border: #262626;
+  --color-gold-bright: #F9E59E;
+  --color-gold-dark: #B48C2E;
+}
+
+@utility gold-gradient {
+  background: linear-gradient(135deg, #D4AF37 0%, #F9E59E 50%, #B48C2E 100%);
+}
+
+@utility gold-text {
+  background: linear-gradient(135deg, #D4AF37 0%, #F9E59E 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+@utility sidebar-item-active {
+  background: rgba(212, 175, 55, 0.1);
+  border-left: 3px solid #D4AF37;
+  color: #D4AF37;
+}
+
+@utility numeric-value {
+  font-variant-numeric: tabular-nums;
+}
+
+html,
+body,
+#root {
+  font-family: "Geist", sans-serif;
+  background-color: #0A0A0A;
+  color: #ffffff;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+

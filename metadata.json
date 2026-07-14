@@ -1,0 +1,6 @@
+{
+  "name": "I AM CHOSEN International Ecosystem",
+  "description": "The official portal for the I AM CHOSEN International member affiliate network and ecosystem, featuring a membership registration system, Chosen wallets, and business cycles tracking.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

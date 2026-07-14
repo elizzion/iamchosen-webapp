@@ -1,0 +1,315 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // --- GLOBAL SAFETY NET ---
+    // Deny all reads/writes to undefined collections by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+    
+    // --- GLOBAL HELPER FUNCTIONS ---
+    
+    // Check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Check if requester is Admin or Super Admin based on their user document
+    function isAdmin() {
+      return isAuthenticated() && 
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        (
+          'role' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data &&
+          (
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Admin' || 
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Super Admin'
+          )
+        );
+    }
+
+    // Check if requester has a specific permission (or is Super Admin)
+    function hasPermission(permissionName) {
+      return isAuthenticated() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        (
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Super Admin' ||
+          (
+            'permissions' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data &&
+            permissionName in get(/databases/$(database)/documents/users/$(request.auth.uid)).data.permissions &&
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.permissions[permissionName] == true
+          ) ||
+          (
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Admin' &&
+            permissionName != 'systemSettings' &&
+            permissionName != 'manageRoles'
+          )
+        );
+    }
+
+    // Check if requester is authorized for corporate treasury (Super Admin, Admin, Finance, Auditor, or Technology Operations)
+    function isTreasuryAdmin() {
+      return isAuthenticated() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        'role' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data &&
+        (
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Super Admin' ||
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Admin' ||
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Finance' ||
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Auditor' ||
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Technology Operations'
+        );
+    }
+
+    // --- TEST CONNECTION COLLECTION ---
+    // Public connection tests when the app boots
+    match /test/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // --- USERS COLLECTION ---
+    match /users/{userId} {
+      // 1. Authenticated users can get user documents (e.g. to fetch sponsor or member details)
+      allow get: if isAuthenticated();
+
+      // 2. Admins with manageMembers can list all users. Anyone can query with limit(1) to verify a sponsor code (even guests during registration).
+      // Also, authenticated users can query to retrieve their referred/sponsored downline.
+      allow list: if (
+        hasPermission('manageMembers') ||
+        ('limit' in request.query && request.query.limit == 1) ||
+        (
+          isAuthenticated() && (
+            resource.data.referredBy == request.auth.uid ||
+            resource.data.sponsorUid == request.auth.uid ||
+            (
+              exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+              'sponsorCode' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data &&
+              resource.data.referredBy == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.sponsorCode
+            )
+          )
+        )
+      );
+      
+      // Anyone can create a user doc during registration (either self or by sponsor)
+      allow create: if isAuthenticated() && (request.auth.uid == userId || request.resource.data.referredBy == request.auth.uid || hasPermission('manageMembers'));
+
+      // Update rules: Allow authenticated users to update profiles (e.g. during transaction sponsor and self updates)
+      allow update: if isAuthenticated();
+
+      // Only authorized Admins can delete profiles
+      allow delete: if hasPermission('manageMembers') || hasPermission('manageRoles');
+    }
+
+    // --- WALLETS COLLECTION ---
+    match /wallets/{userId} {
+      allow get: if isAuthenticated() && (userId == request.auth.uid || hasPermission('manageWallets'));
+      allow list: if isAuthenticated() && hasPermission('manageWallets');
+      
+      // Allow users to create their own wallets, admins to create, or sponsors to create for referred users
+      allow create: if isAuthenticated() && (
+        userId == request.auth.uid || 
+        hasPermission('manageWallets') ||
+        (
+          exists(/databases/$(database)/documents/users/$(userId)) &&
+          get(/databases/$(database)/documents/users/$(userId)).data.referredBy == request.auth.uid
+        )
+      );
+      
+      // Prevent direct client updates to financial data - updates must be driven by Admin SDK or authorized Admin roles
+      allow update: if hasPermission('manageWallets');
+      
+      allow delete: if hasPermission('manageWallets');
+    }
+
+    // --- BUSINESS CYCLES COLLECTION ---
+    match /business_cycles/{userId} {
+      allow get: if isAuthenticated() && (userId == request.auth.uid || hasPermission('manageMembers'));
+      allow list: if isAuthenticated() && hasPermission('manageMembers');
+      
+      // Allow users to create their own cycles, admins to create, or sponsors to create for referred users
+      allow create: if isAuthenticated() && (
+        userId == request.auth.uid || 
+        hasPermission('manageMembers') ||
+        (
+          exists(/databases/$(database)/documents/users/$(userId)) &&
+          get(/databases/$(database)/documents/users/$(userId)).data.referredBy == request.auth.uid
+        )
+      );
+      
+      // Updates are backend-driven; clients cannot update business cycle metrics directly
+      allow update: if hasPermission('manageMembers');
+      
+      allow delete: if hasPermission('manageMembers');
+    }
+
+    // --- WALLET TRANSACTIONS COLLECTION ---
+    match /wallet_transactions/{txId} {
+      allow get: if isAuthenticated() && (resource.data.uid == request.auth.uid || hasPermission('manageWallets'));
+      allow list: if isAuthenticated() && (resource.data.uid == request.auth.uid || hasPermission('manageWallets'));
+      
+      // Prevent direct transaction injections by unauthorized clients
+      allow create: if isAuthenticated() && (
+        hasPermission('manageWallets') ||
+        request.resource.data.uid == request.auth.uid ||
+        (
+          exists(/databases/$(database)/documents/users/$(request.resource.data.uid)) &&
+          get(/databases/$(database)/documents/users/$(request.resource.data.uid)).data.referredBy == request.auth.uid
+        )
+      );
+      allow update, delete: if hasPermission('manageWallets');
+    }
+
+    // --- CASHOUT REQUESTS COLLECTION ---
+    match /cashout_requests/{requestId} {
+      allow get: if isAuthenticated() && (resource.data.uid == request.auth.uid || hasPermission('approveCashOut'));
+      allow list: if isAuthenticated() && (resource.data.uid == request.auth.uid || hasPermission('approveCashOut'));
+      
+      allow create: if isAuthenticated() && request.resource.data.uid == request.auth.uid;
+      allow update, delete: if hasPermission('approveCashOut');
+    }
+
+    // --- AUDIT LOGS COLLECTION ---
+    match /audit_logs/{logId} {
+      allow read: if hasPermission('viewAuditLogs');
+      allow create: if true; // Allow system, guest, and authenticated operations to log events
+      allow update, delete: if false;
+    }
+
+    // --- SYSTEM COLLECTION (INVENTORY ETC) ---
+    match /system/{docId} {
+      allow read: if isAuthenticated();
+      allow write: if hasPermission('manageProducts') || hasPermission('manageInventory') || hasPermission('systemSettings');
+      // Allow checkout stock decrement by authenticated users on inventory
+      allow update: if isAuthenticated() && docId == 'inventory';
+    }
+
+    // --- SYSTEM CONFIG COLLECTION (CC SETTINGS ETC) ---
+    match /system_config/{docId} {
+      allow read: if true; // Everyone can read CC conversion settings (needed for public landing page & dashboards)
+      allow write: if hasPermission('systemSettings');
+    }
+
+    // --- PACKAGES COLLECTION ---
+    match /packages/{packageId} {
+      allow get, list: if true;
+      allow write: if hasPermission('systemSettings');
+    }
+
+    // --- ORDERS COLLECTION ---
+    match /orders/{orderId} {
+      allow get: if isAuthenticated() && (resource.data.uid == request.auth.uid || hasPermission('manageProducts'));
+      allow list: if isAuthenticated() && (resource.data.uid == request.auth.uid || hasPermission('manageProducts'));
+      allow create: if isAuthenticated() && request.resource.data.uid == request.auth.uid;
+      allow update, delete: if hasPermission('manageProducts');
+    }
+
+    // --- CASH-IN REQUESTS COLLECTION ---
+    match /cashin_requests/{requestId} {
+      allow get: if isAuthenticated() && (resource.data.uid == request.auth.uid || hasPermission('manageWallets'));
+      allow list: if isAuthenticated() && (resource.data.uid == request.auth.uid || hasPermission('manageWallets'));
+      allow create: if isAuthenticated() && request.resource.data.uid == request.auth.uid;
+      allow update, delete: if hasPermission('manageWallets');
+    }
+
+    // --- CUSTOMER PACKAGE REQUESTS COLLECTION ---
+    match /customer_package_requests/{requestId} {
+      allow get, list: if isAuthenticated() && (resource.data.uid == request.auth.uid || hasPermission('manageMembers'));
+      allow create: if isAuthenticated() && request.resource.data.uid == request.auth.uid;
+      allow update, delete: if isAuthenticated() && hasPermission('manageMembers');
+    }
+
+    // --- AFFILIATE ACTIVATION REQUESTS COLLECTION ---
+    match /affiliate_activation_requests/{requestId} {
+      allow get, list: if isAuthenticated() && (resource.data.uid == request.auth.uid || hasPermission('manageMembers'));
+      allow create: if isAuthenticated() && request.resource.data.uid == request.auth.uid;
+      allow update, delete: if isAuthenticated() && hasPermission('manageMembers');
+    }
+
+    // --- COMMISSIONS COLLECTION ---
+    match /commissions/{commissionId} {
+      allow get: if isAuthenticated() && (resource == null || resource.data.earnerUid == request.auth.uid || hasPermission('manageWallets'));
+      allow list: if isAuthenticated() && (resource == null || resource.data.earnerUid == request.auth.uid || hasPermission('manageWallets'));
+      
+      // Clients are strictly forbidden from creating commission logs directly
+      allow create: if hasPermission('manageWallets');
+      allow update, delete: if hasPermission('manageWallets');
+    }
+
+    // --- FLUSHED COMMISSIONS COLLECTION ---
+    match /flushed_commissions/{flushedId} {
+      allow get, list: if isAuthenticated() && (resource == null || resource.data.originalEarnerUid == request.auth.uid || hasPermission('manageWallets'));
+      
+      // Clients are strictly forbidden from writing flushed logs directly
+      allow create: if hasPermission('manageWallets');
+      allow update, delete: if hasPermission('manageWallets');
+    }
+
+    // --- ACTIVATION IDEMPOTENCY COLLECTION ---
+    match /activation_idempotency/{key} {
+      allow read: if isAuthenticated() && (resource == null || resource.data.uid == request.auth.uid);
+      allow write: if false; // Only Admin SDK can write
+    }
+
+    // --- MSA ENTITLEMENTS COLLECTION ---
+    match /msa_entitlements/{userId} {
+      allow read: if isAuthenticated() && (userId == request.auth.uid || hasPermission('manageMembers'));
+      allow write: if false; // Only Admin SDK can write
+    }
+
+    // --- PACKAGE COMPENSATION EVENTS COLLECTION ---
+    match /package_compensation_events/{eventId} {
+      allow read: if isAuthenticated() && (resource == null || resource.data.uid == request.auth.uid || hasPermission('manageMembers'));
+      allow write: if false; // Only Admin SDK can write
+    }
+
+    // --- P2P TRANSFERS COLLECTION ---
+    match /p2p_transfers/{transferId} {
+      allow get: if isAuthenticated() && (resource.data.senderUid == request.auth.uid || resource.data.recipientUid == request.auth.uid);
+      allow list: if false;
+      allow write: if false;
+    }
+
+    // --- NOTIFICATIONS COLLECTION ---
+    match /notifications/{notificationId} {
+      allow get: if isAuthenticated() && (resource.data.uid == request.auth.uid || hasPermission('manageMembers'));
+      allow list: if isAuthenticated() && (resource.data.uid == request.auth.uid || hasPermission('manageMembers'));
+      allow create: if isAuthenticated();
+      allow update, delete: if isAuthenticated() && (resource.data.uid == request.auth.uid || hasPermission('manageMembers'));
+    }
+
+    // --- REACTIVATION REPORTS COLLECTION ---
+    match /reactivation_reports/{reportId} {
+      allow get, list: if isAuthenticated() && (hasPermission('viewAuditLogs') || hasPermission('manageMembers'));
+      allow create: if isAuthenticated();
+      allow update, delete: if false;
+    }
+
+    // --- SYSTEM TREASURIES COLLECTION ---
+    match /system_treasuries/{treasuryId} {
+      allow get: if isAuthenticated();
+      allow list: if isTreasuryAdmin();
+      allow write: if isAuthenticated();
+    }
+
+    // --- TRANSFER FEE TRANSACTIONS COLLECTION ---
+    match /transfer_fee_transactions/{feeTransactionId} {
+      allow get, list: if isTreasuryAdmin();
+      allow create: if isAuthenticated();
+      allow update: if isTreasuryAdmin();
+      allow delete: if false;
+    }
+
+    // --- TREASURY DISBURSEMENTS COLLECTION ---
+    match /treasury_disbursements/{disbursementId} {
+      allow get, list, write: if isTreasuryAdmin();
+    }
+
+    // --- DASHBOARD SUMMARY COLLECTION ---
+    match /dashboard_summary/{userId} {
+      allow get: if isAuthenticated() && (userId == request.auth.uid || hasPermission('manageMembers'));
+      allow list: if isAuthenticated() && hasPermission('manageMembers');
+      allow write: if false;
+    }
+  }
+}

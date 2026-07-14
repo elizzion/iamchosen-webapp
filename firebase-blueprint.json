@@ -1,0 +1,419 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "Information about a registered member (Customer, Affiliate, Admin, etc.)",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth user unique ID" },
+        "memberId": { "type": "string", "description": "Unique, company-assigned ID like IAM-1000123" },
+        "fullName": { "type": "string", "description": "Full legal name" },
+        "email": { "type": "string", "format": "email", "description": "Email address" },
+        "mobileNumber": { "type": "string", "description": "Mobile contact number" },
+        "role": { "type": "string", "enum": ["Super Admin", "Admin", "Customer", "Affiliate", "City Distributor", "Regional Distributor"], "description": "Assigned platform role" },
+        "accountType": { "type": "string", "enum": ["Customer", "Affiliate"], "description": "Category selected at registration" },
+        "sponsorCode": { "type": "string", "description": "Unique, shareable sponsor link/code" },
+        "referredBy": { "type": "string", "description": "The sponsorCode of the referring distributor" },
+        "status": { "type": "string", "enum": ["Active", "Inactive", "Completed"], "description": "Business cycle or membership status" },
+        "kycStatus": { "type": "string", "enum": ["Unverified", "Pending", "Verified"], "description": "KYC documentation status" },
+        "packageLevel": { "type": "string", "enum": ["Bronze", "Silver", "Gold", "Platinum", "Diamond", "None"], "description": "Current active product package" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "memberId", "fullName", "email", "role", "accountType", "sponsorCode", "status", "kycStatus", "packageLevel"]
+    },
+    "Wallet": {
+      "title": "User Digital Wallet",
+      "description": "Usable and commission balances inside the I AM CHOSEN ecosystem",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "chosenWalletBalance": { "type": "number", "description": "Stores available Chosen Credits (CC)" },
+        "commissionWalletBalance": { "type": "number", "description": "Temporarily stores direct, unilevel, leadership, infinity bonuses" },
+        "marketingSupportWalletBalance": { "type": "number", "description": "Stores daily Marketing Support Allocation earnings" },
+        "rewardWalletBalance": { "type": "number", "description": "Stores star, travel, and recognition incentives" },
+        "cashWalletStatus": { "type": "string", "description": "Current cashout accessibility status" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "chosenWalletBalance", "commissionWalletBalance", "marketingSupportWalletBalance", "rewardWalletBalance"]
+    },
+    "BusinessCycle": {
+      "title": "Business Cycle Status",
+      "description": "Earning cycle and capacity limits attached to Affiliate package level",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "packageLevel": { "type": "string" },
+        "packageValueCC": { "type": "number" },
+        "earningsCapCC": { "type": "number", "description": "2.5x package value" },
+        "currentQualifiedEarningsCC": { "type": "number", "description": "Accumulated earnings counted toward cap" },
+        "remainingCapacityCC": { "type": "number", "description": "earningsCap - currentQualifiedEarnings" },
+        "status": { "type": "string", "enum": ["Active", "Completed", "None"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "packageLevel", "packageValueCC", "earningsCapCC", "currentQualifiedEarningsCC", "remainingCapacityCC", "status"]
+    },
+    "WalletTransaction": {
+      "title": "Wallet Transaction Ledger",
+      "description": "Transaction details for credits and debits on wallets",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "uid": { "type": "string" },
+        "amount": { "type": "number" },
+        "type": { "type": "string", "enum": ["CREDIT", "DEBIT"] },
+        "walletType": { "type": "string" },
+        "description": { "type": "string" },
+        "status": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "uid", "amount", "type", "walletType", "status", "createdAt"]
+    },
+    "CashoutRequest": {
+      "title": "Cashout Request Detail",
+      "description": "Submitted cashout request properties",
+      "type": "object",
+      "properties": {
+        "requestId": { "type": "string" },
+        "uid": { "type": "string" },
+        "memberId": { "type": "string" },
+        "fullName": { "type": "string" },
+        "amountCC": { "type": "number" },
+        "grossPhp": { "type": "number" },
+        "withholdingTax": { "type": "number" },
+        "adminFeePhp": { "type": "number" },
+        "netPhp": { "type": "number" },
+        "payoutChannel": { "type": "string" },
+        "destinationDetails": { "type": "string" },
+        "status": { "type": "string" },
+        "requestDate": { "type": "string", "format": "date-time" },
+        "expectedReleaseDate": { "type": "string", "format": "date-time" }
+      },
+      "required": ["requestId", "uid", "memberId", "fullName", "amountCC", "grossPhp", "withholdingTax", "adminFeePhp", "netPhp", "payoutChannel", "destinationDetails", "status", "requestDate"]
+    },
+    "AuditLog": {
+      "title": "Audit Log Record",
+      "description": "System event record for security auditing",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "actorUid": { "type": "string" },
+        "actorEmail": { "type": "string" },
+        "action": { "type": "string" },
+        "details": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "actorUid", "action", "timestamp"]
+    },
+    "Order": {
+      "title": "Product Order Purchase Record",
+      "description": "Information about a product purchased by a customer using CC",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "uid": { "type": "string" },
+        "productName": { "type": "string" },
+        "priceCC": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "uid", "productName", "priceCC", "createdAt"]
+    },
+    "CashinRequest": {
+      "title": "Cash-In Request Record",
+      "description": "Request submitted by users to top up their wallet with CC",
+      "type": "object",
+      "properties": {
+        "requestId": { "type": "string" },
+        "uid": { "type": "string" },
+        "memberId": { "type": "string" },
+        "fullName": { "type": "string" },
+        "amountCC": { "type": "number" },
+        "amountPhp": { "type": "number" },
+        "paymentChannel": { "type": "string" },
+        "referenceNumber": { "type": "string" },
+        "accountName": { "type": "string" },
+        "accountNumber": { "type": "string" },
+        "status": { "type": "string" },
+        "requestDate": { "type": "string", "format": "date-time" },
+        "approvedAt": { "type": "string", "format": "date-time" },
+        "approvedBy": { "type": "string" },
+        "declinedAt": { "type": "string", "format": "date-time" },
+        "declinedBy": { "type": "string" }
+      },
+      "required": ["requestId", "uid", "memberId", "fullName", "amountCC", "amountPhp", "paymentChannel", "referenceNumber", "accountName", "accountNumber", "status", "requestDate"]
+    },
+    "FlushedCommission": {
+      "title": "Flushed Commission Record",
+      "description": "Commissions redirected/flushed to the company due to complete business cycle",
+      "type": "object",
+      "properties": {
+        "flushedCommissionId": { "type": "string" },
+        "originalCommissionId": { "type": "string" },
+        "originalEarnerUid": { "type": "string" },
+        "originalEarnerMemberId": { "type": "string" },
+        "originalEarnerName": { "type": "string" },
+        "amountCC": { "type": "number" },
+        "reason": { "type": "string" },
+        "status": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["flushedCommissionId", "originalEarnerUid", "amountCC", "reason", "status", "createdAt"]
+    },
+    "P2pTransfer": {
+      "title": "Peer-to-Peer Transfer Record",
+      "description": "Information about Chosen Credit transfers between users",
+      "type": "object",
+      "properties": {
+        "transferId": { "type": "string" },
+        "senderUid": { "type": "string" },
+        "senderMemberId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "recipientUid": { "type": "string" },
+        "recipientMemberId": { "type": "string" },
+        "recipientName": { "type": "string" },
+        "amountCC": { "type": "number" },
+        "feeCC": { "type": "number" },
+        "totalDebitCC": { "type": "number" },
+        "idempotencyKey": { "type": "string" },
+        "status": { "type": "string", "enum": ["COMPLETED", "FAILED"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["transferId", "senderUid", "senderMemberId", "recipientUid", "recipientMemberId", "amountCC", "feeCC", "totalDebitCC", "idempotencyKey", "status", "createdAt"]
+    },
+    "Notification": {
+      "title": "User Notification",
+      "description": "System alert or notification for a specific user",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "uid": { "type": "string" },
+        "title": { "type": "string" },
+        "desc": { "type": "string" },
+        "date": { "type": "string" },
+        "unread": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "uid", "title", "desc", "date", "unread", "createdAt"]
+    },
+    "ReactivationReport": {
+      "title": "Reactivation Report",
+      "description": "Logs and reports of business cycle reactivation events",
+      "type": "object",
+      "properties": {
+        "reactivationId": { "type": "string" },
+        "uid": { "type": "string" },
+        "memberId": { "type": "string" },
+        "memberName": { "type": "string" },
+        "oldPackage": { "type": "string" },
+        "newPackage": { "type": "string" },
+        "actionType": { "type": "string" },
+        "packageValueCC": { "type": "number" },
+        "phpEquivalent": { "type": "number" },
+        "previousBusinessCycleId": { "type": "string" },
+        "newBusinessCycleId": { "type": "string" },
+        "sponsorUid": { "type": "string" },
+        "sponsorMemberId": { "type": "string" },
+        "directReferralBonusCC": { "type": "number" },
+        "unilevelBonusTotalCC": { "type": "number" },
+        "flushedAmountCC": { "type": "number" },
+        "msaReset": { "type": "boolean" },
+        "msaStartDate": { "type": "string", "format": "date-time" },
+        "status": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "createdBy": { "type": "string" }
+      },
+      "required": ["reactivationId", "uid", "memberId", "memberName", "oldPackage", "newPackage", "actionType", "packageValueCC", "phpEquivalent", "status", "createdAt", "createdBy"]
+    },
+    "TreasuryAccount": {
+      "title": "Treasury Account",
+      "description": "Represents a system-owned corporate treasury account",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "displayName": { "type": "string" },
+        "accountType": { "type": "string", "enum": ["SYSTEM_TREASURY"] },
+        "classification": { "type": "string", "enum": ["CORPORATE_TECHNOLOGY_REVENUE"] },
+        "status": { "type": "string", "enum": ["ACTIVE", "LOCKED"] },
+        "balanceCC": { "type": "number" },
+        "isMemberWallet": { "type": "boolean" },
+        "isCommissionWallet": { "type": "boolean" },
+        "isPubliclyVisible": { "type": "boolean" },
+        "countsTowardBusinessCycle": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "displayName", "accountType", "classification", "status", "balanceCC", "isMemberWallet", "isCommissionWallet", "isPubliclyVisible", "countsTowardBusinessCycle", "createdAt", "updatedAt"]
+    },
+    "TransferFeeTransaction": {
+      "title": "Transfer Fee Transaction",
+      "description": "Ledger entries for platform transfer fees charged on P2P transfers",
+      "type": "object",
+      "properties": {
+        "feeTransactionId": { "type": "string" },
+        "sourceTransferId": { "type": "string" },
+        "sourceTransferType": { "type": "string" },
+        "sourceTransferStatus": { "type": "string", "enum": ["COMPLETED", "FAILED", "REVERSED"] },
+        "payerUid": { "type": "string" },
+        "payerMemberId": { "type": "string" },
+        "payerName": { "type": "string" },
+        "receiverUid": { "type": "string" },
+        "receiverMemberId": { "type": "string" },
+        "receiverName": { "type": "string" },
+        "feeType": { "type": "string", "enum": ["PLATFORM_TRANSFER_FEE"] },
+        "feeAmountType": { "type": "string", "enum": ["FIXED", "PERCENTAGE"] },
+        "feeAmountCC": { "type": "number" },
+        "transferAmountCC": { "type": "number" },
+        "totalSenderDeductionCC": { "type": "number" },
+        "destinationTreasuryId": { "type": "string" },
+        "publicDescription": { "type": "string" },
+        "internalClassification": { "type": "string", "enum": ["CORPORATE_TECHNOLOGY_REVENUE"] },
+        "senderFeeLedgerTransactionId": { "type": "string" },
+        "treasuryLedgerTransactionId": { "type": "string" },
+        "configurationVersion": { "type": "string" },
+        "idempotencyKey": { "type": "string" },
+        "status": { "type": "string", "enum": ["COMPLETED", "FAILED", "REVERSED"] },
+        "reversalStatus": { "type": "string", "enum": ["NOT_REVERSED", "REVERSED"] },
+        "reversedAmountCC": { "type": "number" },
+        "reversalTransactionId": { "type": "string" },
+        "reversalReason": { "type": "string" },
+        "reversalActorEmail": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "completedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["feeTransactionId", "sourceTransferId", "sourceTransferType", "sourceTransferStatus", "payerUid", "payerMemberId", "payerName", "receiverUid", "receiverMemberId", "receiverName", "feeType", "feeAmountType", "feeAmountCC", "transferAmountCC", "totalSenderDeductionCC", "destinationTreasuryId", "publicDescription", "internalClassification", "senderFeeLedgerTransactionId", "treasuryLedgerTransactionId", "configurationVersion", "idempotencyKey", "status", "reversalStatus", "reversedAmountCC", "createdAt", "completedAt", "updatedAt"]
+    },
+    "TreasuryDisbursement": {
+      "title": "Treasury Disbursement",
+      "description": "Requests and entries for technology operations compensation disbursements from corporate treasury",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "authorityReference": { "type": "string" },
+        "corporateApprovalRecord": { "type": "string" },
+        "payeeIdentity": { "type": "string" },
+        "amountCC": { "type": "number" },
+        "accountingClassification": { "type": "string", "enum": ["TECHNOLOGY_OPERATIONS_COMPENSATION_DISBURSEMENT"] },
+        "taxTreatment": { "type": "string" },
+        "approvalActor": { "type": "string" },
+        "paymentReference": { "type": "string" },
+        "supportingDocRef": { "type": "string" },
+        "status": { "type": "string", "enum": ["REQUESTED", "APPROVED", "RELEASED", "REJECTED"] },
+        "requestedAt": { "type": "string", "format": "date-time" },
+        "approvedAt": { "type": "string", "format": "date-time" },
+        "releasedAt": { "type": "string", "format": "date-time" },
+        "rejectedAt": { "type": "string", "format": "date-time" },
+        "ledgerTransactionId": { "type": "string" },
+        "notes": { "type": "string" }
+      },
+      "required": ["id", "authorityReference", "corporateApprovalRecord", "payeeIdentity", "amountCC", "accountingClassification", "taxTreatment", "approvalActor", "paymentReference", "supportingDocRef", "status", "requestedAt"]
+    },
+    "DashboardSummary": {
+      "title": "Dashboard Performance Summary",
+      "description": "Pre-calculated aggregates for affiliate/customer performance dashboards",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "rankProgressPercent": { "type": "number" },
+        "directAffiliateCount": { "type": "number" },
+        "smartCustomerCount": { "type": "number" },
+        "affiliateBusinessCount": { "type": "number" },
+        "personalVolumeCC": { "type": "number" },
+        "groupVolumeCC": { "type": "number" },
+        "referralBonusesCC": { "type": "number" },
+        "leadershipBonusCC": { "type": "number" },
+        "infinityBonusCC": { "type": "number" },
+        "marketingSupportCC": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid"]
+    },
+    "CommunityLinks": {
+      "title": "Community Links Settings",
+      "description": "System settings containing URLs for official social media and support channels",
+      "type": "object",
+      "properties": {
+        "telegramUrl": { "type": "string", "description": "URL to Telegram channel/group" },
+        "whatsappUrl": { "type": "string", "description": "URL to WhatsApp community" },
+        "instagramUrl": { "type": "string", "description": "URL to Instagram page" },
+        "facebookUrl": { "type": "string", "description": "URL to Facebook page" },
+        "isActive": { "type": "boolean", "description": "Whether the community links are active" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "updatedBy": { "type": "string" }
+      },
+      "required": ["isActive"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Stores individual member profile detail documents"
+    },
+    "/wallets/{userId}": {
+      "schema": "Wallet",
+      "description": "Digital wallet accounts containing balance structures for each user"
+    },
+    "/business_cycles/{userId}": {
+      "schema": "BusinessCycle",
+      "description": "Maintains 2.5x earning cap tracker details for affiliates"
+    },
+    "/wallet_transactions/{txId}": {
+      "schema": "WalletTransaction",
+      "description": "Maintains individual wallet transaction records"
+    },
+    "/cashout_requests/{requestId}": {
+      "schema": "CashoutRequest",
+      "description": "Maintains user submitted withdrawal requests"
+    },
+    "/cashin_requests/{requestId}": {
+      "schema": "CashinRequest",
+      "description": "Maintains user submitted cash-in requests"
+    },
+    "/orders/{orderId}": {
+      "schema": "Order",
+      "description": "Stores customer product purchase transaction details"
+    },
+    "/flushed_commissions/{flushedId}": {
+      "schema": "FlushedCommission",
+      "description": "Stores details of commissions flushed to the company upon business cycle completion"
+    },
+    "/p2p_transfers/{transferId}": {
+      "schema": "P2pTransfer",
+      "description": "Maintains user-to-user credit transfer records with fee audits"
+    },
+    "/notifications/{notificationId}": {
+      "schema": "Notification",
+      "description": "Maintains individual user alerts and notification records"
+    },
+    "/audit_logs/{logId}": {
+      "schema": "AuditLog",
+      "description": "Tracks profile edits, role modifications, and authentication transactions"
+    },
+    "/reactivation_reports/{reportId}": {
+      "schema": "ReactivationReport",
+      "description": "Maintains logs and reports of business cycle reactivation events"
+    },
+    "/system_treasuries/{treasuryId}": {
+      "schema": "TreasuryAccount",
+      "description": "System owned corporate treasury account document"
+    },
+    "/transfer_fee_transactions/{feeTransactionId}": {
+      "schema": "TransferFeeTransaction",
+      "description": "Transaction details and ledger references for platform transfer fees"
+    },
+    "/treasury_disbursements/{disbursementId}": {
+      "schema": "TreasuryDisbursement",
+      "description": "Technology operations treasury disbursement request entries"
+    },
+    "/dashboard_summary/{userId}": {
+      "schema": "DashboardSummary",
+      "description": "Aggregated user progress metrics for the performance dashboard"
+    },
+    "/system_config/community_links": {
+      "schema": "CommunityLinks",
+      "description": "System settings containing social community links"
+    }
+  }
+}

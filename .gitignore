@@ -1,0 +1,27 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+
+# Firebase / Google Cloud credentials
+service-account*.json
+*service-account*.json
+firebase-adminsdk*.json
+google-credentials*.json
+*.pem
+*.key
+
+# Firebase generated files
+.firebase/
+functions/lib/
+functions/node_modules/
+
+# Local backups
+backup_files/
+
+# Operating system files
+Thumbs.db
