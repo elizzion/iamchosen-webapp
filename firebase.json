@@ -1,0 +1,11 @@
+﻿{
+  "functions": {
+    "source": "functions"
+  },
+  "firestore": [
+    {
+      "database": "ai-studio-choseninternatio-e8f32de0-3246-4255-97e0-380012b7fd9e",
+      "rules": "firestore.rules"
+    }
+  ]
+}

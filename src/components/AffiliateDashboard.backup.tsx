@@ -33,9 +33,6 @@ import {
   ShoppingBag,
   Ticket,
   ShieldAlert,
-  BanknoteArrowDown,
-  ChartCandlestick,
-  ChartNoAxesCombined,
 } from 'lucide-react'
 import { db, createAuditLog } from '../firebase'
 import {
@@ -137,8 +134,8 @@ const PACKAGE_CONFIGS: Record<string, PackageConfig> = {
     bgClass: 'bg-emerald-400/10',
     glowClass: 'shadow-emerald-400/20',
     gradientClass: 'from-emerald-400 to-green-600',
-    packageValue: 25750,
-    cycleMax: 64375,
+    packageValue: 10000,
+    cycleMax: 25000,
   },
   'Regional Distributor': {
     displayName: 'Regional Distributor',
@@ -147,88 +144,14 @@ const PACKAGE_CONFIGS: Record<string, PackageConfig> = {
     bgClass: 'bg-indigo-400/10',
     glowClass: 'shadow-indigo-400/20',
     gradientClass: 'from-indigo-400 to-blue-600',
-    packageValue: 105000,
-    cycleMax: 262500,
+    packageValue: 25000,
+    cycleMax: 62500,
   },
 }
 
 const getPackageConfig = (level: string | undefined): PackageConfig => {
   const normalized = level || 'Bronze'
   return PACKAGE_CONFIGS[normalized] || PACKAGE_CONFIGS.Bronze
-}
-
-type CanonicalAccountStatus = 'Active' | 'Inactive' | 'Suspended' | 'Pending'
-type CanonicalBusinessCycleStatus = 'Active' | 'Completed'
-
-/**
- * Account status and Business Cycle status are separate domains.
- *
- * `Completed` is valid for a Business Cycle, not for a member account.
- * Legacy affiliate user records that incorrectly contain `status: "Completed"`
- * are treated as active in the dashboard while the backend data is corrected.
- */
-const resolveAccountStatus = (
-  profile: Partial<UserProfile> | Record<string, unknown> | null | undefined,
-): CanonicalAccountStatus => {
-  const rawStatus = String(
-    (profile as any)?.accountStatus ?? (profile as any)?.status ?? '',
-  )
-    .trim()
-    .toLowerCase()
-
-  if (rawStatus === 'active') return 'Active'
-  if (rawStatus === 'suspended') return 'Suspended'
-  if (rawStatus === 'pending') return 'Pending'
-  if (rawStatus === 'inactive') return 'Inactive'
-
-  if (rawStatus === 'completed') {
-    const packageLevel = String((profile as any)?.packageLevel || 'None')
-    const role = String((profile as any)?.role || '')
-    const accountType = String((profile as any)?.accountType || '')
-
-    if (
-      packageLevel !== 'None' &&
-      (role === 'Affiliate' || accountType === 'Affiliate')
-    ) {
-      return 'Active'
-    }
-  }
-
-  return 'Inactive'
-}
-
-/**
- * The earnings cap is authoritative for determining whether a cycle is done.
- *
- * This deliberately corrects legacy/stale records where the cycle document
- * says `Completed` even though qualified earnings are still below the cap.
- * The raw status is used only when the numeric cycle values are unavailable.
- */
-const resolveBusinessCycleStatus = (
-  cycle: BusinessCycle | null | undefined,
-): CanonicalBusinessCycleStatus | null => {
-  if (!cycle) return null
-
-  const currentQualifiedEarningsCC = Number(
-    cycle.currentQualifiedEarningsCC ?? 0,
-  )
-  const earningsCapCC = Number(cycle.earningsCapCC ?? 0)
-
-  const hasValidCycleAmounts =
-    Number.isFinite(currentQualifiedEarningsCC) &&
-    currentQualifiedEarningsCC >= 0 &&
-    Number.isFinite(earningsCapCC) &&
-    earningsCapCC > 0
-
-  if (hasValidCycleAmounts) {
-    return currentQualifiedEarningsCC >= earningsCapCC ? 'Completed' : 'Active'
-  }
-
-  const rawStatus = String((cycle as any).cycleStatus ?? cycle.status ?? '')
-    .trim()
-    .toLowerCase()
-
-  return rawStatus === 'completed' ? 'Completed' : 'Active'
 }
 
 interface AffiliateDashboardProps {
@@ -400,12 +323,9 @@ export default function AffiliateDashboard({
       const cycleData = await PackageService.getBusinessCycle(userProfile.uid)
       if (cycleData) {
         setBusinessCycle(cycleData)
-        setShowCompletedModal(
-          resolveBusinessCycleStatus(cycleData) === 'Completed',
-        )
-      } else {
-        setBusinessCycle(null)
-        setShowCompletedModal(false)
+        if (cycleData.status === 'Completed') {
+          setShowCompletedModal(true)
+        }
       }
     } catch (err) {
       console.error(
@@ -466,7 +386,6 @@ export default function AffiliateDashboard({
       const cashinQuery = query(
         collection(db, 'cashin_requests'),
         where('uid', '==', userProfile.uid),
-        limit(50),
       )
       const cashinSnap = await getDocs(cashinQuery)
       const cashinList = cashinSnap.docs.map((doc) => doc.data())
@@ -505,7 +424,6 @@ export default function AffiliateDashboard({
       const q1 = query(
         collection(db, 'users'),
         where('referredBy', '==', userProfile.uid),
-        limit(100),
       )
       const s1 = await getDocs(q1)
       s1.docs.forEach((d) => {
@@ -516,7 +434,6 @@ export default function AffiliateDashboard({
       const q2 = query(
         collection(db, 'users'),
         where('sponsorUid', '==', userProfile.uid),
-        limit(100),
       )
       const s2 = await getDocs(q2)
       s2.docs.forEach((d) => {
@@ -528,7 +445,6 @@ export default function AffiliateDashboard({
         const q3 = query(
           collection(db, 'users'),
           where('referredBy', '==', userProfile.sponsorCode),
-          limit(100),
         )
         const s3 = await getDocs(q3)
         s3.docs.forEach((d) => {
@@ -792,8 +708,8 @@ export default function AffiliateDashboard({
       Gold: 1500,
       Platinum: 3000,
       Diamond: 5000,
-      'City Distributor': 25750,
-      'Regional Distributor': 105000,
+      'City Distributor': 10000,
+      'Regional Distributor': 25000,
     }
 
     const currentLevel = userProfile.packageLevel || 'Bronze'
@@ -1080,8 +996,8 @@ export default function AffiliateDashboard({
       Gold: 1500,
       Platinum: 3000,
       Diamond: 5000,
-      'City Distributor': 25750,
-      'Regional Distributor': 105000,
+      'City Distributor': 10000,
+      'Regional Distributor': 25000,
     }
     const foundPkg = dbPackages.find((p) => p.id === level || p.name === level)
     if (foundPkg && typeof foundPkg.valueCC === 'number') {
@@ -1089,10 +1005,6 @@ export default function AffiliateDashboard({
     }
     return stdMap[level] || 50
   }
-
-  const accountStatus = resolveAccountStatus(userProfile)
-  const cycleStatus = resolveBusinessCycleStatus(businessCycle)
-  const isBusinessCycleCompleted = cycleStatus === 'Completed'
 
   const activeAffiliatePackages = [
     'Bronze',
@@ -1110,8 +1022,8 @@ export default function AffiliateDashboard({
     const hasActivePackage = activeAffiliatePackages.includes(
       member.packageLevel,
     )
-    const isActiveAccount = resolveAccountStatus(member) === 'Active'
-    return isAffiliate && hasActivePackage && isActiveAccount
+    const isActive = member.status === 'Active'
+    return isAffiliate && hasActivePackage && isActive
   })
 
   // 1. Personal Sales in CC (convert from PHP if only PHP exists)
@@ -1174,35 +1086,26 @@ export default function AffiliateDashboard({
     return (
       <div className='space-y-6'>
         {/* Active Business Plan Cycle Card */}
-        <div className='bg-zinc-950 border border-cyan-800/80 rounded-3xl p-6 shadow-xl relative overflow-hidden group'>
+        <div className='bg-zinc-950 border border-zinc-800/80 rounded-3xl p-6 shadow-xl relative overflow-hidden group'>
+          <div className='absolute top-0 inset-x-0 h-[2px] bg-amber-500/80' />
+          <div className='absolute top-0 right-0 w-32 h-64 bg-amber-500/5 rounded-full blur-3xl pointer-events-none' />
           <div className='flex justify-between items-start mb-5'>
             <div>
               <h3 className='font-extrabold text-sm text-white uppercase tracking-tight flex items-center gap-2'>
-                <ShieldCheck className='w-4 h-4 text-cyan-500 animate-pulse' />{' '}
+                <ShieldCheck className='w-4 h-4 text-amber-500 animate-pulse' />{' '}
                 Business Cycle Progress
               </h3>
             </div>
-            {businessCycle && cycleStatus && (
-              <div className='flex flex-wrap justify-end gap-2'>
-                <span
-                  className={`text-[9px] font-mono px-2.5 py-1 rounded-full uppercase font-bold border ${
-                    accountStatus === 'Active'
-                      ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/15'
-                      : 'bg-amber-500/10 text-amber-400 border-amber-500/15'
-                  }`}
-                >
-                  Account: {accountStatus}
-                </span>
-                <span
-                  className={`text-[9px] font-mono px-2.5 py-1 rounded-full uppercase font-bold border ${
-                    cycleStatus === 'Active'
-                      ? 'bg-cyan-500/10 text-cyan-400 border-cyan-500/15'
-                      : 'bg-red-500/10 text-red-400 border-red-500/15'
-                  }`}
-                >
-                  Cycle: {cycleStatus}
-                </span>
-              </div>
+            {businessCycle && (
+              <span
+                className={`text-[9px] font-mono px-2.5 py-1 rounded-full uppercase font-bold border ${
+                  businessCycle.status === 'Active'
+                    ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/15'
+                    : 'bg-red-500/10 text-red-400 border-red-500/15'
+                }`}
+              >
+                {businessCycle.status}
+              </span>
             )}
           </div>
 
@@ -1221,20 +1124,15 @@ export default function AffiliateDashboard({
                 </div>
                 <div className='w-full bg-zinc-900 h-5 rounded-full overflow-hidden border border-zinc-800'>
                   <div
-                    className='cyan-gradient h-full transition-all duration-500'
+                    className='gold-gradient h-full transition-all duration-500'
                     style={{
                       width: `${Math.min(100, (businessCycle.currentQualifiedEarningsCC / businessCycle.earningsCapCC) * 100)}%`,
                     }}
                   />
                 </div>
-                <div className='flex items-center justify-center  text-[10px] text-zinc-500 uppercase font-mono'>
-                  <span className='text-cyan-500 font-bold'>
-                    {Math.max(
-                      Number(businessCycle.earningsCapCC || 0) -
-                        Number(businessCycle.currentQualifiedEarningsCC || 0),
-                      0,
-                    )}{' '}
-                    CC capacity remaining
+                <div className='flex items-center justify-center text-[10px] text-zinc-500 uppercase font-mono'>
+                  <span className='text-amber-500 font-bold'>
+                    {businessCycle.remainingCapacityCC} CC capacity remaining
                   </span>
                 </div>
               </div>
@@ -1517,7 +1415,7 @@ export default function AffiliateDashboard({
 
         {/* Main Workspace Frame */}
         <main className='max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 pt-6 pb-[100px] lg:pb-10 space-y-6'>
-          {businessCycle && isBusinessCycleCompleted && (
+          {businessCycle && businessCycle.status === 'Completed' && (
             <div className='bg-red-500/10 border border-red-500/20 text-red-400 p-6 rounded-3xl flex flex-col md:flex-row justify-between items-start md:items-center gap-6 relative overflow-hidden'>
               <div className='absolute top-0 inset-y-0 left-0 w-1 bg-red-500' />
               <div>
@@ -1526,9 +1424,8 @@ export default function AffiliateDashboard({
                   Business Cycle Completed
                 </h3>
                 <p className='text-xs text-zinc-300 mt-1 max-w-2xl leading-relaxed'>
-                  Your member account remains {accountStatus}. Your current
-                  Business Cycle reached its earnings cap, so commission
-                  eligibility is paused until reactivation or upgrade.
+                  Your Business Cycle is completed. Reactivate or upgrade to
+                  continue earning commissions.
                 </p>
               </div>
               <div className='flex gap-2.5 shrink-0 w-full md:w-auto mt-2 md:mt-0'>
@@ -1543,7 +1440,7 @@ export default function AffiliateDashboard({
                   }}
                   className='flex-1 md:flex-none px-4 py-2 bg-zinc-900 hover:bg-zinc-850 text-white font-bold text-xs uppercase tracking-wider rounded-xl border border-zinc-800 cursor-pointer transition-colors'
                 >
-                  Reactivate Business Cycle
+                  Reactivate Account
                 </button>
                 <button
                   onClick={() => {
@@ -1556,7 +1453,7 @@ export default function AffiliateDashboard({
                   }}
                   className='flex-1 md:flex-none px-4 py-2 bg-cyan-500 hover:bg-cyan-400 text-black font-extrabold text-xs uppercase tracking-wider rounded-xl cursor-pointer transition-colors'
                 >
-                  Upgrade Package
+                  Upgrade Account
                 </button>
               </div>
             </div>
@@ -1577,19 +1474,19 @@ export default function AffiliateDashboard({
             onCashIn={() => onNavigate('cash-in')}
             onUpgrade={() => setShowUpgradeModal(true)}
             onTransfer={() => onNavigate('p2p-transfer')}
-            canUpgrade={userProfile.packageLevel !== 'Regional Distributor'}
+            canUpgrade={userProfile.packageLevel !== 'Diamond'}
             canTransfer={true}
           />
 
           {/* Wallet Overview (Collapsible Card) */}
-          <div className='bg-[#111318] border border-cyan-800/80 rounded-3xl shadow-xl overflow-hidden'>
+          <div className='bg-[#111318] border border-zinc-800/80 rounded-3xl shadow-xl overflow-hidden'>
             {/* Header Bar */}
             <div
               onClick={() => setIsWalletExpanded((prev) => !prev)}
-              className='p-6 flex flex-col sm:flex-row justify-between items-start sm:items-center cursor-pointer select-none bg-[#171A22] border-b border-cyan-500/40 hover:bg-zinc-900/30 transition-colors gap-4 sm:gap-0'
+              className='p-6 flex flex-col sm:flex-row justify-between items-start sm:items-center cursor-pointer select-none bg-[#171A22] border-b border-zinc-800/40 hover:bg-zinc-900/30 transition-colors gap-4 sm:gap-0'
             >
               <div className='flex items-center gap-3'>
-                <div className='w-9 h-9 bg-cyan-500/10 border border-cyan-500/25 text-cyan-400 rounded-xl flex items-center justify-center'>
+                <div className='w-9 h-9 bg-[#CD7F32]/10 border border-[#CD7F32]/25 text-[#CD7F32] rounded-xl flex items-center justify-center'>
                   <WalletIcon className='w-4 h-4' />
                 </div>
                 <div>
@@ -1643,13 +1540,14 @@ export default function AffiliateDashboard({
                 {/* Rest of Portfolio Grid (4 items: Commission, Marketing Support, Reward, and Cash Wallet) */}
                 <div className='grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4'>
                   {/* Commission Wallet */}
-                  <div className='bg-zinc-950 border border-cyan-800/80 rounded-2xl p-4 shadow-md relative overflow-hidden group'>
+                  <div className='bg-zinc-950 border border-zinc-850 rounded-2xl p-4 shadow-md relative overflow-hidden group'>
+                    <div className='absolute top-0 inset-x-0 h-[2px] bg-amber-500' />
                     <div className='flex justify-between items-start mb-2'>
-                      <span className='text-[11px] text-zinc-500 uppercase tracking-widest font-mono'>
+                      <span className='text-[9px] text-zinc-500 uppercase tracking-widest font-mono'>
                         Total Earnings
                       </span>
-                      <div className='w-8 h-8 bg-amber-500/10 rounded-md flex items-center justify-center border border-amber-500/25 text-amber-500'>
-                        <DollarSign className='w-5 h-5' />
+                      <div className='w-5 h-5 bg-amber-500/10 rounded-md flex items-center justify-center border border-amber-500/25 text-amber-500'>
+                        <DollarSign className='w-3 h-3' />
                       </div>
                     </div>
                     <div className='text-base font-black tracking-tight text-white mb-0.5'>
@@ -1658,7 +1556,7 @@ export default function AffiliateDashboard({
                         : '0.00'}{' '}
                       CC
                     </div>
-                    <div className='text-[11px] text-zinc-400 font-mono'>
+                    <div className='text-[9px] text-zinc-400 font-mono'>
                       ≈ ₱
                       {wallet
                         ? (
@@ -1670,13 +1568,14 @@ export default function AffiliateDashboard({
                   </div>
 
                   {/* Marketing Support Wallet */}
-                  <div className='bg-zinc-950 border border-cyan-800/80 rounded-2xl p-4 shadow-md relative overflow-hidden'>
+                  <div className='bg-zinc-950 border border-zinc-850 rounded-2xl p-4 shadow-md relative overflow-hidden'>
+                    <div className='absolute top-0 inset-x-0 h-[2px] bg-blue-500' />
                     <div className='flex justify-between items-start mb-2'>
-                      <span className='text-[11px] text-zinc-500 uppercase tracking-widest font-mono'>
+                      <span className='text-[9px] text-zinc-500 uppercase tracking-widest font-mono'>
                         MSA
                       </span>
-                      <div className='w-8 h-8 bg-blue-500/10 rounded-md flex items-center justify-center border border-blue-500/25 text-blue-400'>
-                        <ChartNoAxesCombined className='w-5 h-5' />
+                      <div className='w-5 h-5 bg-blue-500/10 rounded-md flex items-center justify-center border border-blue-500/25 text-blue-400'>
+                        <TrendingUp className='w-3 h-3' />
                       </div>
                     </div>
                     <div className='text-base font-black tracking-tight text-white mb-0.5'>
@@ -1685,7 +1584,7 @@ export default function AffiliateDashboard({
                         : '0.00'}{' '}
                       CC
                     </div>
-                    <div className='text-[11px] text-zinc-400 font-mono'>
+                    <div className='text-[9px] text-zinc-400 font-mono'>
                       ≈ ₱
                       {wallet
                         ? (
@@ -1699,13 +1598,14 @@ export default function AffiliateDashboard({
                   </div>
 
                   {/* Reward Wallet */}
-                  <div className='bg-zinc-950 border border-cyan-800/80 rounded-2xl p-4 shadow-md relative overflow-hidden'>
+                  <div className='bg-zinc-950 border border-zinc-850 rounded-2xl p-4 shadow-md relative overflow-hidden'>
+                    <div className='absolute top-0 inset-x-0 h-[2px] bg-emerald-500' />
                     <div className='flex justify-between items-start mb-2'>
                       <span className='text-[9px] text-zinc-500 uppercase tracking-widest font-mono'>
                         Today's Earnings
                       </span>
-                      <div className='w-8 h-8 bg-emerald-500/10 rounded-md flex items-center justify-center border border-emerald-500/25 text-emerald-400'>
-                        <ChartCandlestick className='w-5 h-5' />
+                      <div className='w-5 h-5 bg-emerald-500/10 rounded-md flex items-center justify-center border border-emerald-500/25 text-emerald-400'>
+                        <Award className='w-3 h-3' />
                       </div>
                     </div>
                     <div className='text-base font-black tracking-tight text-white mb-0.5'>
@@ -1724,13 +1624,14 @@ export default function AffiliateDashboard({
                   </div>
 
                   {/* Cash Wallet */}
-                  <div className='bg-zinc-950 border border-cyan-800/80 rounded-2xl p-4 shadow-md relative overflow-hidden'>
+                  <div className='bg-zinc-950 border border-zinc-850 rounded-2xl p-4 shadow-md relative overflow-hidden'>
+                    <div className='absolute top-0 inset-x-0 h-[2px] bg-teal-500' />
                     <div className='flex justify-between items-start mb-2'>
                       <span className='text-[9px] text-zinc-500 uppercase tracking-widest font-mono'>
                         Withdrawable Balance
                       </span>
-                      <div className='w-8 h-8 bg-teal-500/10 rounded-md flex items-center justify-center border border-teal-500/25 text-teal-400'>
-                        <BanknoteArrowDown className='w-5 h-5' />
+                      <div className='w-5 h-5 bg-teal-500/10 rounded-md flex items-center justify-center border border-teal-500/25 text-teal-400'>
+                        <TrendingUp className='w-3 h-3' />
                       </div>
                     </div>
                     <div className='text-base font-black tracking-tight text-white mb-0.5'>
@@ -1772,7 +1673,7 @@ export default function AffiliateDashboard({
           )}
 
           {/* AI Coach Advice Banner */}
-          <div className='bg-zinc-950 border border-cyan-800/80 rounded-3xl p-6 shadow-xl relative overflow-hidden group'>
+          <div className='bg-zinc-950 border border-zinc-800/80 rounded-3xl p-6 shadow-xl relative overflow-hidden group'>
             <div className='absolute top-0 right-0 w-32 h-32 bg-teal-500/5 rounded-full blur-3xl pointer-events-none' />
             <div className='flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4'>
               <div className='flex items-start gap-3'>
@@ -1791,7 +1692,7 @@ export default function AffiliateDashboard({
               </div>
               <button
                 onClick={() => setShowAICoachModal(true)}
-                className='bg-[#111318] border border-cyan-800 hover:border-teal-500/50 hover:text-teal-400 font-extrabold text-[10px] py-2 px-4 rounded-xl transition-all cursor-pointer flex items-center gap-1.5 uppercase tracking-wider shrink-0'
+                className='bg-[#111318] border border-zinc-800 hover:border-teal-500/50 hover:text-teal-400 font-extrabold text-[10px] py-2 px-4 rounded-xl transition-all cursor-pointer flex items-center gap-1.5 uppercase tracking-wider shrink-0'
               >
                 Ask AI Coach <Sparkles className='w-3 h-3 animate-pulse' />
               </button>
@@ -1854,8 +1755,7 @@ export default function AffiliateDashboard({
                     className='w-full bg-zinc-900 border border-zinc-800 focus:border-cyan-500/50 rounded-xl px-4 py-2.5 text-xs font-mono text-white focus:outline-none transition-all'
                   />
                   <span className='block text-[9px] text-zinc-500 mt-1'>
-                    A fixed Platform Transfer Fee of 1 CC is charged per
-                    completed transfer.
+                    A flat fee of 0.50 CC is charged per transaction.
                   </span>
                 </div>
 
@@ -2336,8 +2236,8 @@ export default function AffiliateDashboard({
                         Gold: 1500,
                         Platinum: 3000,
                         Diamond: 5000,
-                        'City Distributor': 25750,
-                        'Regional Distributor': 105000,
+                        'City Distributor': 10000,
+                        'Regional Distributor': 25000,
                       }
                       const currentVal =
                         valCCMap[userProfile.packageLevel || 'Bronze'] || 0
@@ -2361,8 +2261,8 @@ export default function AffiliateDashboard({
                       Gold: 1500,
                       Platinum: 3000,
                       Diamond: 5000,
-                      'City Distributor': 25750,
-                      'Regional Distributor': 105000,
+                      'City Distributor': 10000,
+                      'Regional Distributor': 25000,
                     }
                     const capCCMap: Record<string, number> = {
                       Bronze: 125,
@@ -2370,8 +2270,8 @@ export default function AffiliateDashboard({
                       Gold: 3750,
                       Platinum: 7500,
                       Diamond: 12500,
-                      'City Distributor': 64375,
-                      'Regional Distributor': 262500,
+                      'City Distributor': 25000,
+                      'Regional Distributor': 62500,
                     }
 
                     const currentLevel = userProfile.packageLevel || 'Bronze'
@@ -2464,8 +2364,8 @@ export default function AffiliateDashboard({
                           Gold: 1500,
                           Platinum: 3000,
                           Diamond: 5000,
-                          'City Distributor': 25750,
-                          'Regional Distributor': 105000,
+                          'City Distributor': 10000,
+                          'Regional Distributor': 25000,
                         }
                         const diffVal =
                           (valCCMap[selectedUpgradeLevel] || 0) -
@@ -2504,9 +2404,9 @@ export default function AffiliateDashboard({
 
               <p className='text-zinc-300 text-sm font-light leading-relaxed mb-6'>
                 You have reached your current Business Cycle earning capacity.
-                Your member account remains {accountStatus}. To continue
-                receiving commission earnings, reactivate your current Business
-                Cycle or upgrade to a higher package.
+                To continue receiving commission earnings, privileges, and
+                business benefits, please reactivate your current package or
+                upgrade to a higher package.
               </p>
 
               <div className='space-y-3'>
@@ -2521,7 +2421,7 @@ export default function AffiliateDashboard({
                   }}
                   className='w-full py-3 bg-zinc-900 hover:bg-zinc-850 text-white font-extrabold text-xs uppercase tracking-wider rounded-xl border border-zinc-800 cursor-pointer transition-colors'
                 >
-                  Reactivate Business Cycle
+                  Reactivate Account
                 </button>
                 <button
                   onClick={() => {
@@ -2534,7 +2434,7 @@ export default function AffiliateDashboard({
                   }}
                   className='w-full py-3 bg-cyan-500 hover:bg-cyan-400 text-black font-extrabold text-xs uppercase tracking-wider rounded-xl cursor-pointer transition-colors'
                 >
-                  Upgrade Package
+                  Upgrade Account
                 </button>
                 <button
                   onClick={() => setShowCompletedModal(false)}

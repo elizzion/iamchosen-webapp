@@ -33,9 +33,6 @@ import {
   ShoppingBag,
   Ticket,
   ShieldAlert,
-  BanknoteArrowDown,
-  ChartCandlestick,
-  ChartNoAxesCombined,
 } from 'lucide-react'
 import { db, createAuditLog } from '../firebase'
 import {
@@ -221,7 +218,9 @@ const resolveBusinessCycleStatus = (
     earningsCapCC > 0
 
   if (hasValidCycleAmounts) {
-    return currentQualifiedEarningsCC >= earningsCapCC ? 'Completed' : 'Active'
+    return currentQualifiedEarningsCC >= earningsCapCC
+      ? 'Completed'
+      : 'Active'
   }
 
   const rawStatus = String((cycle as any).cycleStatus ?? cycle.status ?? '')
@@ -1174,11 +1173,13 @@ export default function AffiliateDashboard({
     return (
       <div className='space-y-6'>
         {/* Active Business Plan Cycle Card */}
-        <div className='bg-zinc-950 border border-cyan-800/80 rounded-3xl p-6 shadow-xl relative overflow-hidden group'>
+        <div className='bg-zinc-950 border border-zinc-800/80 rounded-3xl p-6 shadow-xl relative overflow-hidden group'>
+          <div className='absolute top-0 inset-x-0 h-[2px] bg-amber-500/80' />
+          <div className='absolute top-0 right-0 w-32 h-64 bg-amber-500/5 rounded-full blur-3xl pointer-events-none' />
           <div className='flex justify-between items-start mb-5'>
             <div>
               <h3 className='font-extrabold text-sm text-white uppercase tracking-tight flex items-center gap-2'>
-                <ShieldCheck className='w-4 h-4 text-cyan-500 animate-pulse' />{' '}
+                <ShieldCheck className='w-4 h-4 text-amber-500 animate-pulse' />{' '}
                 Business Cycle Progress
               </h3>
             </div>
@@ -1221,20 +1222,19 @@ export default function AffiliateDashboard({
                 </div>
                 <div className='w-full bg-zinc-900 h-5 rounded-full overflow-hidden border border-zinc-800'>
                   <div
-                    className='cyan-gradient h-full transition-all duration-500'
+                    className='gold-gradient h-full transition-all duration-500'
                     style={{
                       width: `${Math.min(100, (businessCycle.currentQualifiedEarningsCC / businessCycle.earningsCapCC) * 100)}%`,
                     }}
                   />
                 </div>
                 <div className='flex items-center justify-center  text-[10px] text-zinc-500 uppercase font-mono'>
-                  <span className='text-cyan-500 font-bold'>
+                  <span className='text-amber-500 font-bold'>
                     {Math.max(
                       Number(businessCycle.earningsCapCC || 0) -
                         Number(businessCycle.currentQualifiedEarningsCC || 0),
                       0,
-                    )}{' '}
-                    CC capacity remaining
+                    )} CC capacity remaining
                   </span>
                 </div>
               </div>
@@ -1582,14 +1582,14 @@ export default function AffiliateDashboard({
           />
 
           {/* Wallet Overview (Collapsible Card) */}
-          <div className='bg-[#111318] border border-cyan-800/80 rounded-3xl shadow-xl overflow-hidden'>
+          <div className='bg-[#111318] border border-zinc-800/80 rounded-3xl shadow-xl overflow-hidden'>
             {/* Header Bar */}
             <div
               onClick={() => setIsWalletExpanded((prev) => !prev)}
-              className='p-6 flex flex-col sm:flex-row justify-between items-start sm:items-center cursor-pointer select-none bg-[#171A22] border-b border-cyan-500/40 hover:bg-zinc-900/30 transition-colors gap-4 sm:gap-0'
+              className='p-6 flex flex-col sm:flex-row justify-between items-start sm:items-center cursor-pointer select-none bg-[#171A22] border-b border-zinc-800/40 hover:bg-zinc-900/30 transition-colors gap-4 sm:gap-0'
             >
               <div className='flex items-center gap-3'>
-                <div className='w-9 h-9 bg-cyan-500/10 border border-cyan-500/25 text-cyan-400 rounded-xl flex items-center justify-center'>
+                <div className='w-9 h-9 bg-[#CD7F32]/10 border border-[#CD7F32]/25 text-[#CD7F32] rounded-xl flex items-center justify-center'>
                   <WalletIcon className='w-4 h-4' />
                 </div>
                 <div>
@@ -1643,13 +1643,14 @@ export default function AffiliateDashboard({
                 {/* Rest of Portfolio Grid (4 items: Commission, Marketing Support, Reward, and Cash Wallet) */}
                 <div className='grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4'>
                   {/* Commission Wallet */}
-                  <div className='bg-zinc-950 border border-cyan-800/80 rounded-2xl p-4 shadow-md relative overflow-hidden group'>
+                  <div className='bg-zinc-950 border border-zinc-850 rounded-2xl p-4 shadow-md relative overflow-hidden group'>
+                    <div className='absolute top-0 inset-x-0 h-[2px] bg-amber-500' />
                     <div className='flex justify-between items-start mb-2'>
-                      <span className='text-[11px] text-zinc-500 uppercase tracking-widest font-mono'>
+                      <span className='text-[9px] text-zinc-500 uppercase tracking-widest font-mono'>
                         Total Earnings
                       </span>
-                      <div className='w-8 h-8 bg-amber-500/10 rounded-md flex items-center justify-center border border-amber-500/25 text-amber-500'>
-                        <DollarSign className='w-5 h-5' />
+                      <div className='w-5 h-5 bg-amber-500/10 rounded-md flex items-center justify-center border border-amber-500/25 text-amber-500'>
+                        <DollarSign className='w-3 h-3' />
                       </div>
                     </div>
                     <div className='text-base font-black tracking-tight text-white mb-0.5'>
@@ -1658,7 +1659,7 @@ export default function AffiliateDashboard({
                         : '0.00'}{' '}
                       CC
                     </div>
-                    <div className='text-[11px] text-zinc-400 font-mono'>
+                    <div className='text-[9px] text-zinc-400 font-mono'>
                       ≈ ₱
                       {wallet
                         ? (
@@ -1670,13 +1671,14 @@ export default function AffiliateDashboard({
                   </div>
 
                   {/* Marketing Support Wallet */}
-                  <div className='bg-zinc-950 border border-cyan-800/80 rounded-2xl p-4 shadow-md relative overflow-hidden'>
+                  <div className='bg-zinc-950 border border-zinc-850 rounded-2xl p-4 shadow-md relative overflow-hidden'>
+                    <div className='absolute top-0 inset-x-0 h-[2px] bg-blue-500' />
                     <div className='flex justify-between items-start mb-2'>
-                      <span className='text-[11px] text-zinc-500 uppercase tracking-widest font-mono'>
+                      <span className='text-[9px] text-zinc-500 uppercase tracking-widest font-mono'>
                         MSA
                       </span>
-                      <div className='w-8 h-8 bg-blue-500/10 rounded-md flex items-center justify-center border border-blue-500/25 text-blue-400'>
-                        <ChartNoAxesCombined className='w-5 h-5' />
+                      <div className='w-5 h-5 bg-blue-500/10 rounded-md flex items-center justify-center border border-blue-500/25 text-blue-400'>
+                        <TrendingUp className='w-3 h-3' />
                       </div>
                     </div>
                     <div className='text-base font-black tracking-tight text-white mb-0.5'>
@@ -1685,7 +1687,7 @@ export default function AffiliateDashboard({
                         : '0.00'}{' '}
                       CC
                     </div>
-                    <div className='text-[11px] text-zinc-400 font-mono'>
+                    <div className='text-[9px] text-zinc-400 font-mono'>
                       ≈ ₱
                       {wallet
                         ? (
@@ -1699,13 +1701,14 @@ export default function AffiliateDashboard({
                   </div>
 
                   {/* Reward Wallet */}
-                  <div className='bg-zinc-950 border border-cyan-800/80 rounded-2xl p-4 shadow-md relative overflow-hidden'>
+                  <div className='bg-zinc-950 border border-zinc-850 rounded-2xl p-4 shadow-md relative overflow-hidden'>
+                    <div className='absolute top-0 inset-x-0 h-[2px] bg-emerald-500' />
                     <div className='flex justify-between items-start mb-2'>
                       <span className='text-[9px] text-zinc-500 uppercase tracking-widest font-mono'>
                         Today's Earnings
                       </span>
-                      <div className='w-8 h-8 bg-emerald-500/10 rounded-md flex items-center justify-center border border-emerald-500/25 text-emerald-400'>
-                        <ChartCandlestick className='w-5 h-5' />
+                      <div className='w-5 h-5 bg-emerald-500/10 rounded-md flex items-center justify-center border border-emerald-500/25 text-emerald-400'>
+                        <Award className='w-3 h-3' />
                       </div>
                     </div>
                     <div className='text-base font-black tracking-tight text-white mb-0.5'>
@@ -1724,13 +1727,14 @@ export default function AffiliateDashboard({
                   </div>
 
                   {/* Cash Wallet */}
-                  <div className='bg-zinc-950 border border-cyan-800/80 rounded-2xl p-4 shadow-md relative overflow-hidden'>
+                  <div className='bg-zinc-950 border border-zinc-850 rounded-2xl p-4 shadow-md relative overflow-hidden'>
+                    <div className='absolute top-0 inset-x-0 h-[2px] bg-teal-500' />
                     <div className='flex justify-between items-start mb-2'>
                       <span className='text-[9px] text-zinc-500 uppercase tracking-widest font-mono'>
                         Withdrawable Balance
                       </span>
-                      <div className='w-8 h-8 bg-teal-500/10 rounded-md flex items-center justify-center border border-teal-500/25 text-teal-400'>
-                        <BanknoteArrowDown className='w-5 h-5' />
+                      <div className='w-5 h-5 bg-teal-500/10 rounded-md flex items-center justify-center border border-teal-500/25 text-teal-400'>
+                        <TrendingUp className='w-3 h-3' />
                       </div>
                     </div>
                     <div className='text-base font-black tracking-tight text-white mb-0.5'>
@@ -1772,7 +1776,7 @@ export default function AffiliateDashboard({
           )}
 
           {/* AI Coach Advice Banner */}
-          <div className='bg-zinc-950 border border-cyan-800/80 rounded-3xl p-6 shadow-xl relative overflow-hidden group'>
+          <div className='bg-zinc-950 border border-zinc-800/80 rounded-3xl p-6 shadow-xl relative overflow-hidden group'>
             <div className='absolute top-0 right-0 w-32 h-32 bg-teal-500/5 rounded-full blur-3xl pointer-events-none' />
             <div className='flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4'>
               <div className='flex items-start gap-3'>
@@ -1791,7 +1795,7 @@ export default function AffiliateDashboard({
               </div>
               <button
                 onClick={() => setShowAICoachModal(true)}
-                className='bg-[#111318] border border-cyan-800 hover:border-teal-500/50 hover:text-teal-400 font-extrabold text-[10px] py-2 px-4 rounded-xl transition-all cursor-pointer flex items-center gap-1.5 uppercase tracking-wider shrink-0'
+                className='bg-[#111318] border border-zinc-800 hover:border-teal-500/50 hover:text-teal-400 font-extrabold text-[10px] py-2 px-4 rounded-xl transition-all cursor-pointer flex items-center gap-1.5 uppercase tracking-wider shrink-0'
               >
                 Ask AI Coach <Sparkles className='w-3 h-3 animate-pulse' />
               </button>
@@ -1854,8 +1858,7 @@ export default function AffiliateDashboard({
                     className='w-full bg-zinc-900 border border-zinc-800 focus:border-cyan-500/50 rounded-xl px-4 py-2.5 text-xs font-mono text-white focus:outline-none transition-all'
                   />
                   <span className='block text-[9px] text-zinc-500 mt-1'>
-                    A fixed Platform Transfer Fee of 1 CC is charged per
-                    completed transfer.
+                    A fixed Platform Transfer Fee of 1 CC is charged per completed transfer.
                   </span>
                 </div>
 
