@@ -1713,6 +1713,9 @@ export const executeP2PTransferV2 = onCall<ExecuteP2PTransferRequest>(
           if (ccSettings.isActive !== true) {
             throw new Error('INACTIVE_CC_SETTINGS')
           }
+          if (ccSettings.p2pTransfersEnabled !== true) {
+            throw new Error('P2P_TRANSFERS_DISABLED')
+          }
 
           if (ccSettings.transferFeeEnabled === false) {
             throw new Error('INACTIVE_TRANSFER_FEE')
