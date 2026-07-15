@@ -5,13 +5,10 @@ import {
   Users,
   ChevronRight,
   CheckCircle,
-  Info,
   ShieldAlert,
-  Sparkles,
   X,
   Activity,
   Server,
-  Database,
 } from 'lucide-react'
 import { db } from '../../../firebase'
 import {
@@ -21,6 +18,7 @@ import {
   query,
   where,
   getDocs,
+  limit,
 } from 'firebase/firestore'
 import { UserProfile, Wallet, BusinessCycle } from '../../../types'
 import { CommissionService } from '../../../services/commission/commission.service'
@@ -137,19 +135,115 @@ export interface PerformanceData {
   progressPercent: number
   infinityBonus: string
   directPartners: number
+  totalNetworkMembers: number
+  customers: number
   smartCustomers: number
   affiliateBusiness: number
+  activeNetworkMembers: number
+  inactiveNetworkMembers: number
   productVolumeCC: number
+  groupProductVolumeCC: number
   packageVolumeCC: number
-  referralBonusesCC: number
+  directReferralCC: number
+  indirectReferralCC: number
   leadershipBonusCC: number
   infinityBonusCC: number
+  unilevelBonusCC: number
   marketingSupportCC: number
+  totalNetworkEarningsCC: number
   nextRankLabel: string
+  summaryUpdatedAt: string | null
+}
+
+function normalizeMetricText(value: unknown): string {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, '')
+}
+
+function toFiniteMetric(value: unknown, fallback = 0): number {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
+function readMetric(
+  source: Record<string, unknown>,
+  keys: string[],
+  fallback = 0,
+): number {
+  for (const key of keys) {
+    if (source[key] !== undefined && source[key] !== null) {
+      const value = Number(source[key])
+      if (Number.isFinite(value)) return value
+    }
+  }
+  return fallback
+}
+
+function readTimestampLabel(value: unknown): string | null {
+  if (!value) return null
+
+  if (typeof value === 'string' || typeof value === 'number') {
+    const date = new Date(value)
+    return Number.isNaN(date.getTime()) ? null : date.toLocaleString()
+  }
+
+  if (typeof value === 'object' && value !== null && 'toDate' in value) {
+    const toDate = (value as { toDate?: unknown }).toDate
+    if (typeof toDate === 'function') {
+      const date = (toDate as () => Date)()
+      return Number.isNaN(date.getTime()) ? null : date.toLocaleString()
+    }
+  }
+
+  return null
+}
+
+function isActiveNetworkRecord(record: Record<string, unknown>): boolean {
+  return normalizeMetricText(record.status || record.accountStatus) === 'active'
+}
+
+function isAffiliateNetworkRecord(record: Record<string, unknown>): boolean {
+  const accountType = normalizeMetricText(record.accountType)
+  const role = normalizeMetricText(record.role)
+
+  return (
+    accountType === 'affiliate' ||
+    role === 'affiliate' ||
+    role === 'citydistributor' ||
+    role === 'regionaldistributor'
+  )
+}
+
+function isSmartCustomerNetworkRecord(
+  record: Record<string, unknown>,
+): boolean {
+  const accountType = normalizeMetricText(record.accountType)
+  return accountType === 'smartcustomer'
+}
+
+function isBasicCustomerNetworkRecord(
+  record: Record<string, unknown>,
+): boolean {
+  const accountType = normalizeMetricText(record.accountType)
+  const role = normalizeMetricText(record.role)
+
+  return (
+    !isAffiliateNetworkRecord(record) &&
+    !isSmartCustomerNetworkRecord(record) &&
+    (accountType === 'customer' || role === 'customer')
+  )
 }
 
 // Sets of approved package levels
 export const SMART_CUSTOMER_PACKAGES = new Set([
+  // Current Smart Customer package catalog.
+  'Wellness Starter Kit',
+  'Family Health Essentials',
+  'Ultimate Longevity System',
+
+  // Legacy Smart Customer records retained for backward compatibility.
   'Bronze',
   'Silver',
   'Gold',
@@ -181,36 +275,35 @@ export function evaluateCardVisibility(userProfile: UserProfile | null) {
     }
   }
 
-  const accountType = userProfile.accountType
+  const accountType = normalizeMetricText(userProfile.accountType)
   const packageLevel = userProfile.packageLevel || 'None'
 
   const showSmartCustomerCard =
-    accountType === 'Smart Customer' &&
+    accountType === 'smartcustomer' &&
     typeof packageLevel === 'string' &&
     SMART_CUSTOMER_PACKAGES.has(packageLevel)
 
   const showAffiliateCard =
-    accountType === 'Affiliate' &&
+    accountType === 'affiliate' &&
     typeof packageLevel === 'string' &&
     AFFILIATE_PACKAGES.has(packageLevel)
 
   // Network card visibility condition
   const showNetworkCard =
-    accountType === 'Affiliate' &&
+    accountType === 'affiliate' &&
     typeof packageLevel === 'string' &&
     AFFILIATE_PACKAGES.has(packageLevel)
 
   // Validate the current combination
-  const isBasicCustomer = accountType === 'Customer' && packageLevel === 'None'
+  const isBasicCustomer = accountType === 'customer' && packageLevel === 'None'
   const isValidSmartCustomer =
-    accountType === 'Smart Customer' &&
-    SMART_CUSTOMER_PACKAGES.has(packageLevel)
+    accountType === 'smartcustomer' && SMART_CUSTOMER_PACKAGES.has(packageLevel)
   const isValidAffiliate =
-    accountType === 'Affiliate' && AFFILIATE_PACKAGES.has(packageLevel)
+    accountType === 'affiliate' && AFFILIATE_PACKAGES.has(packageLevel)
 
   // Bypass logic for System and Admin roles if they view their dashboards (which can have packageLevel === "None")
   const isSystemAdminBypass =
-    accountType === 'System' ||
+    accountType === 'system' ||
     userProfile.role === 'Super Admin' ||
     userProfile.role === 'Admin'
 
@@ -235,9 +328,7 @@ export interface SmartCustomerStatusCardProps {
 }
 
 export function SmartCustomerStatusCard({
-  userProfile,
   packageLevel,
-  data,
 }: SmartCustomerStatusCardProps) {
   const config = RANK_STYLE_CONFIGS['None']
   // Style accent optionally based on actual package level for distinct visualization while remaining a Smart Customer Status Card
@@ -306,7 +397,6 @@ export interface AffiliateRankCardProps {
 }
 
 export function AffiliateRankCard({
-  userProfile,
   packageLevel,
   data,
 }: AffiliateRankCardProps) {
@@ -341,11 +431,10 @@ export function AffiliateRankCard({
           <h2
             className={`text-2xl font-black uppercase tracking-tight ${config.textColor}`}
           >
-            {config.displayName}
+            CHOSEN ASSOCIATE
           </h2>
           <p className='text-[11px] text-zinc-500 font-mono uppercase tracking-wider mt-1.5'>
-            Infinity Bonus:{' '}
-            <span className='font-bold text-white'>{config.infinityBonus}</span>
+            Infinity Bonus: <span className='font-bold text-white'>0%</span>
           </p>
         </div>
 
@@ -402,135 +491,214 @@ interface NetworkCardProps {
   onViewDetails: () => void
 }
 
+function NetworkMetricRow({
+  label,
+  value,
+  valueClassName = 'text-white',
+}: {
+  label: string
+  value: React.ReactNode
+  valueClassName?: string
+}) {
+  return (
+    <div className='flex items-center justify-between gap-4 text-sm'>
+      <span className='min-w-0 text-zinc-500'>{label}</span>
+      <span
+        className={`shrink-0 text-right font-extrabold font-mono ${valueClassName}`}
+      >
+        {value}
+      </span>
+    </div>
+  )
+}
+
 export function DashboardNetworkCard({
   variant,
   showMarketingSupport,
   data,
   onViewDetails,
 }: NetworkCardProps) {
+  const affiliateEligible = variant === 'affiliate'
+  const earningsLabel = (value: number) =>
+    affiliateEligible ? `${value.toFixed(2)} CC` : 'Not Eligible'
+
   return (
     <div
       id='dashboard-network-card'
-      className='relative overflow-hidden rounded-3xl border border-cyan-800/80 bg-zinc-950 p-6 shadow-xl'
+      className='relative flex h-full flex-col overflow-hidden rounded-3xl border border-cyan-800/80 bg-zinc-950 p-6 shadow-xl'
     >
+      <div className='pointer-events-none absolute -right-16 -top-16 h-44 w-44 rounded-full bg-cyan-500/10 blur-[80px]' />
+
       {/* Header */}
-      <div className='flex items-center gap-2 mb-5'>
-        <div className='p-2.5 rounded-2xl border border-cyan-400/10 text-cyan-400 bg-cyan-400/5'>
-          <Users className='w-5 h-5' />
+      <div className='relative z-10 mb-5 flex items-center justify-between gap-3'>
+        <div className='flex min-w-0 items-center gap-2'>
+          <div className='rounded-2xl border border-cyan-400/10 bg-cyan-400/5 p-2.5 text-cyan-400'>
+            <Users className='h-5 w-5' />
+          </div>
+          <div className='min-w-0'>
+            <h4 className='truncate text-xs font-bold uppercase tracking-widest text-zinc-300 font-mono'>
+              Network Summary
+            </h4>
+            <p className='mt-0.5 text-[9px] uppercase tracking-wider text-zinc-600 font-mono'>
+              Members, volume and income streams
+            </p>
+          </div>
         </div>
-        <h4 className='text-xs font-bold text-zinc-400 uppercase me-2 tracking-widest font-mono'>
-          Network Summary
-        </h4>
-        <div className='p-2.5 rounded-2xl border border-cyan-400/10 text-cyan-400 bg-cyan-400/5'>
-          <Users className='w-5 h-5' />
-        </div>
+
+        <span className='inline-flex shrink-0 items-center gap-1.5 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-[9px] font-black uppercase tracking-wider text-emerald-400 font-mono'>
+          <span className='h-1.5 w-1.5 rounded-full bg-emerald-400' />
+          Live
+        </span>
       </div>
 
-      {/* Network Metrics Rows */}
-      <div className='space-y-3.5'>
-        <div className='grid grid-cols-2 gap-4'>
-          <div className='bg-[#111318]/60 border border-zinc-900 rounded-2xl p-3.5'>
-            <span className='block text-[8px] text-zinc-500 uppercase font-extrabold tracking-widest font-mono'>
+      <div className='relative z-10 flex flex-1 flex-col space-y-4'>
+        {/* Primary network totals */}
+        <div className='grid grid-cols-2 gap-3'>
+          <div className='rounded-2xl border border-zinc-900 bg-[#111318]/70 p-3.5'>
+            <span className='block text-[8px] font-extrabold uppercase tracking-widest text-zinc-500 font-mono'>
               Direct Partners
             </span>
-            <span className='text-lg font-black text-white font-mono'>
-              {data.directPartners}
+            <span className='mt-1 block text-xl font-black text-white font-mono'>
+              {data.directPartners.toLocaleString()}
             </span>
           </div>
-          <div className='bg-[#111318]/60 border border-zinc-900 rounded-2xl p-3.5'>
-            <span className='block text-[8px] text-zinc-500 uppercase font-extrabold tracking-widest font-mono'>
-              Total Network Members
+
+          <div className='rounded-2xl border border-cyan-500/10 bg-cyan-500/5 p-3.5'>
+            <span className='block text-[8px] font-extrabold uppercase tracking-widest text-zinc-500 font-mono'>
+              Total Network
             </span>
-            <span className='text-lg font-black text-cyan-400 font-mono'>
-              {data.smartCustomers + data.affiliateBusiness}
+            <span className='mt-1 block text-xl font-black text-cyan-400 font-mono'>
+              {data.totalNetworkMembers.toLocaleString()}
             </span>
           </div>
         </div>
 
-        {/* Detailed breakdown */}
-        <div className='space-y-2 border-t border-zinc-900/60 pt-3'>
-          <div className='flex justify-between items-center text-sm'>
-            <span className='text-zinc-500'>Smart Customers</span>
-            <span className='font-bold text-white font-mono'>
-              {data.smartCustomers}
+        {/* Network composition */}
+        <div className='rounded-2xl border border-zinc-900 bg-[#0D0F14]/70 p-4'>
+          <div className='mb-3 flex items-center justify-between'>
+            <span className='text-[9px] font-black uppercase tracking-widest text-zinc-500 font-mono'>
+              Network Composition
+            </span>
+            <span className='text-[9px] text-zinc-600 font-mono'>
+              Active {data.activeNetworkMembers.toLocaleString()}
             </span>
           </div>
-          <div className='flex justify-between items-center text-sm'>
-            <span className='text-zinc-500'>Affiliate Businesses</span>
-            <span className='font-bold text-white font-mono'>
-              {data.affiliateBusiness}
-            </span>
-          </div>
-          <div className='flex justify-between items-center text-sm'>
-            <span className='text-zinc-500'>Personal Package Volume</span>
-            <span className='font-extrabold text-white font-mono'>
-              {data.productVolumeCC.toFixed(2)} CC
-            </span>
-          </div>
-          <div className='flex justify-between items-center text-sm'>
-            <span className='text-zinc-500'>Group Package Volume</span>
-            <span className='font-extrabold text-white font-mono'>
-              {data.packageVolumeCC.toFixed(2)} CC
-            </span>
+
+          <div className='space-y-2.5'>
+            <NetworkMetricRow
+              label='Customers'
+              value={data.customers.toLocaleString()}
+            />
+            <NetworkMetricRow
+              label='Smart Customers'
+              value={data.smartCustomers.toLocaleString()}
+            />
+            <NetworkMetricRow
+              label='Affiliate Businesses'
+              value={data.affiliateBusiness.toLocaleString()}
+            />
+            <NetworkMetricRow
+              label='Inactive / Paused'
+              value={data.inactiveNetworkMembers.toLocaleString()}
+              valueClassName='text-amber-400'
+            />
           </div>
         </div>
 
-        {/* Divider & Earnings Breakdown */}
-        <div className='border-t border-zinc-900 pt-3.5 space-y-2'>
-          <div className='flex justify-between items-center text-sm'>
-            <span className='text-zinc-500'>Direct & Indirect Earnings</span>
-            <span className='font-extrabold text-teal-400 font-mono'>
-              {variant === 'affiliate'
-                ? `${data.referralBonusesCC.toFixed(2)} CC`
-                : 'Not Eligible'}
-            </span>
+        {/* Business volume */}
+        <div className='border-t border-zinc-900/80 pt-4'>
+          <span className='mb-3 block text-[9px] font-black uppercase tracking-widest text-zinc-500 font-mono'>
+            Business Volume
+          </span>
+          <div className='space-y-2.5'>
+            <NetworkMetricRow
+              label='Personal Product Volume'
+              value={`${data.productVolumeCC.toFixed(2)} CC`}
+            />
+            <NetworkMetricRow
+              label='Group Product Volume'
+              value={`${data.groupProductVolumeCC.toFixed(2)} CC`}
+            />
+            <NetworkMetricRow
+              label='Group Package Volume'
+              value={`${data.packageVolumeCC.toFixed(2)} CC`}
+            />
           </div>
+        </div>
 
-          <div className='flex justify-between items-center text-sm'>
-            <span className='text-zinc-500'>Leadership Earnings</span>
-            <span className='font-extrabold text-zinc-400 font-mono'>
-              {variant === 'affiliate'
-                ? `${data.leadershipBonusCC.toFixed(2)} CC`
-                : 'Not Eligible'}
-            </span>
+        {/* Complete income streams */}
+        <div className='border-t border-zinc-900/80 pt-4'>
+          <span className='mb-3 block text-[9px] font-black uppercase tracking-widest text-zinc-500 font-mono'>
+            Commission Income
+          </span>
+          <div className='space-y-2.5'>
+            <NetworkMetricRow
+              label='Direct Referral Bonus'
+              value={earningsLabel(data.directReferralCC)}
+              valueClassName='text-teal-400'
+            />
+            <NetworkMetricRow
+              label='Indirect Referral Bonus'
+              value={earningsLabel(data.indirectReferralCC)}
+              valueClassName='text-teal-400'
+            />
+            <NetworkMetricRow
+              label='Product Unilevel Bonus'
+              value={earningsLabel(data.unilevelBonusCC)}
+              valueClassName='text-cyan-300'
+            />
+            <NetworkMetricRow
+              label='Leadership Bonus'
+              value={earningsLabel(data.leadershipBonusCC)}
+              valueClassName='text-violet-300'
+            />
+            <NetworkMetricRow
+              label='Infinity Bonus'
+              value={earningsLabel(data.infinityBonusCC)}
+              valueClassName='text-fuchsia-300'
+            />
+
+            {showMarketingSupport && (
+              <NetworkMetricRow
+                label='Marketing Support Allocation'
+                value={`${data.marketingSupportCC.toFixed(2)} CC`}
+                valueClassName='text-amber-400'
+              />
+            )}
           </div>
+        </div>
 
-          <div className='flex justify-between items-center text-sm'>
-            <span className='text-zinc-500'>Unilevel Earnings</span>
-            <span className='font-extrabold text-zinc-400 font-mono'>
-              {variant === 'affiliate'
-                ? `${data.infinityBonusCC.toFixed(2)} CC`
-                : 'Not Eligible'}
-            </span>
-          </div>
-
-          <div className='flex justify-between items-center text-sm'>
-            <span className='text-zinc-500'>Infinity Earnings</span>
-            <span className='font-extrabold text-zinc-400 font-mono'>
-              {variant === 'affiliate'
-                ? `${data.infinityBonusCC.toFixed(2)} CC`
-                : 'Not Eligible'}
-            </span>
-          </div>
-
-          {/* Marketing Support */}
-          {showMarketingSupport && (
-            <div className='flex justify-between items-center text-sm'>
-              <span className='text-zinc-500'>Subscription Earnings</span>
-              <span className='font-extrabold text-[#CD7F32] font-mono'>
-                {data.marketingSupportCC.toFixed(2)} CC
+        {/* Total income */}
+        <div className='rounded-2xl border border-cyan-500/15 bg-gradient-to-r from-cyan-500/10 to-transparent p-4'>
+          <div className='flex items-end justify-between gap-4'>
+            <div>
+              <span className='block text-[9px] font-black uppercase tracking-widest text-zinc-500 font-mono'>
+                Total Reported Income
+              </span>
+              <span className='mt-1 block text-[10px] text-zinc-600'>
+                Referral, product, leadership, infinity and MSA
               </span>
             </div>
-          )}
+            <span className='shrink-0 text-xl font-black text-cyan-300 font-mono'>
+              {affiliateEligible
+                ? `${data.totalNetworkEarningsCC.toFixed(2)} CC`
+                : 'N/A'}
+            </span>
+          </div>
         </div>
 
-        {/* Action Button */}
+        {data.summaryUpdatedAt && (
+          <p className='text-center text-[9px] uppercase tracking-wider text-zinc-700 font-mono'>
+            Updated {data.summaryUpdatedAt}
+          </p>
+        )}
+
         <button
           onClick={onViewDetails}
           style={{ minHeight: '44px' }}
-          className='w-full mt-4 bg-zinc-950 border border-zinc-800 hover:border-cyan-500/50 hover:text-cyan-400 text-zinc-300 font-extrabold text-[11px] uppercase tracking-wider py-2.5 px-4 rounded-xl transition-all duration-300 flex items-center justify-center gap-1.5 cursor-pointer shadow-lg active:scale-[0.98]'
+          className='mt-auto flex w-full items-center justify-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-2.5 text-[11px] font-extrabold uppercase tracking-wider text-zinc-300 shadow-lg transition-all duration-300 hover:border-cyan-500/50 hover:text-cyan-400 active:scale-[0.98] cursor-pointer'
         >
-          View Details <ChevronRight className='w-3.5 h-3.5' />
+          View Network Details <ChevronRight className='h-3.5 w-3.5' />
         </button>
       </div>
     </div>
@@ -543,30 +711,39 @@ interface DashboardPerformanceCardsProps {
   onOpenTeamModal?: () => void
   activeActionModal?: string | null
   setActiveActionModal?: (modal: string | null) => void
+  renderBusinessCycleProgress?: () => React.ReactNode
   renderRecentActivities?: () => React.ReactNode
 }
 
 export default function DashboardPerformanceCards({
   userProfile,
   onNavigate,
-  onOpenTeamModal,
-  activeActionModal,
   setActiveActionModal,
+  renderBusinessCycleProgress,
   renderRecentActivities,
 }: DashboardPerformanceCardsProps) {
   const [data, setData] = useState<PerformanceData>({
     progressPercent: 0,
     infinityBonus: '0.0%',
     directPartners: 0,
+    totalNetworkMembers: 0,
+    customers: 0,
     smartCustomers: 0,
     affiliateBusiness: 0,
+    activeNetworkMembers: 0,
+    inactiveNetworkMembers: 0,
     productVolumeCC: 0,
+    groupProductVolumeCC: 0,
     packageVolumeCC: 0,
-    referralBonusesCC: 0,
+    directReferralCC: 0,
+    indirectReferralCC: 0,
     leadershipBonusCC: 0,
     infinityBonusCC: 0,
+    unilevelBonusCC: 0,
     marketingSupportCC: 0,
+    totalNetworkEarningsCC: 0,
     nextRankLabel: '',
+    summaryUpdatedAt: null,
   })
   const [loading, setLoading] = useState(true)
   const [showCustomerNetworkModal, setShowCustomerNetworkModal] =
@@ -587,7 +764,8 @@ export default function DashboardPerformanceCards({
     isInvalid,
   } = evaluateCardVisibility(userProfile)
 
-  const isAffiliateAccount = userProfile?.accountType === 'Affiliate'
+  const isAffiliateAccount =
+    normalizeMetricText(userProfile?.accountType) === 'affiliate'
   const showMarketingSupport = isAffiliateAccount
   const rankKey = userProfile?.packageLevel || 'Bronze'
 
@@ -614,126 +792,450 @@ export default function DashboardPerformanceCards({
   useEffect(() => {
     if (!userProfile?.uid) return
 
+    let cancelled = false
+
     async function loadPerformanceData() {
       setLoading(true)
-      try {
-        const summaryRef = doc(db, 'dashboard_summary', userProfile.uid)
-        const summarySnap = await getDoc(summaryRef)
 
+      try {
         let progress = 0
         let directPartners = 0
+        let totalNetworkMembers = 0
+        let customers = 0
         let smartCustomers = 0
         let affiliateBusiness = 0
-        let productVol = 0
-        let packageVol = 0
-        let refBonus = 0
-        let leadBonus = 0
-        let infBonus = 0
-        let marketSupport = 0
+        let activeNetworkMembers = 0
+        let inactiveNetworkMembers = 0
+        let productVolumeCC = 0
+        let groupProductVolumeCC = 0
+        let packageVolumeCC = 0
+        let directReferralCC = 0
+        let indirectReferralCC = 0
+        let leadershipBonusCC = 0
+        let infinityBonusCC = 0
+        let unilevelBonusCC = 0
+        let marketingSupportCC = 0
+        let summaryUpdatedAt: string | null = null
 
-        // 1. Resolve Marketing Support from Wallet document
-        const walletRef = doc(db, 'wallets', userProfile.uid)
-        const walletSnap = await getDoc(walletRef)
-        if (walletSnap.exists()) {
-          const wData = walletSnap.data() as Wallet
-          marketSupport = wData.marketingSupportWalletBalance || 0
-        }
+        // Read both supported summary collection names. The versioned server
+        // summary remains authoritative when present.
+        const summaryResults = await Promise.allSettled([
+          getDoc(doc(db, 'dashboard_summaries', userProfile.uid)),
+          getDoc(doc(db, 'dashboard_summary', userProfile.uid)),
+        ])
 
-        // 2. Resolve business cycle progress
-        const cycleRef = doc(db, 'business_cycles', userProfile.uid)
-        const cycleSnap = await getDoc(cycleRef)
-        if (cycleSnap.exists()) {
-          const cycle = cycleSnap.data() as BusinessCycle
-          if (cycle.earningsCapCC > 0) {
-            progress =
-              (cycle.currentQualifiedEarningsCC / cycle.earningsCapCC) * 100
+        let summaryData: Record<string, unknown> | null = null
+        for (const result of summaryResults) {
+          if (result.status === 'fulfilled' && result.value.exists()) {
+            summaryData = result.value.data() as Record<string, unknown>
+            break
           }
         }
 
-        // 3. Resolve Commissions Summary
+        // Marketing Support fallback uses the member-owned wallet balance.
         try {
-          const commSummary = await CommissionService.getCommissionSummary(
-            userProfile.uid,
-          )
-          refBonus = commSummary.totalDirectReferral || 0
-          leadBonus = commSummary.totalLeadership || 0
-          infBonus = commSummary.totalInfinity || 0
-        } catch (err) {
-          console.warn(
-            'Could not fetch Commission summary fallback metrics',
-            err,
-          )
+          const walletSnap = await getDoc(doc(db, 'wallets', userProfile.uid))
+          if (walletSnap.exists()) {
+            const walletData = walletSnap.data() as Wallet
+            marketingSupportCC = toFiniteMetric(
+              walletData.marketingSupportWalletBalance,
+            )
+          }
+        } catch (error) {
+          console.warn('Could not load Marketing Support wallet balance', error)
         }
 
-        // 4. Resolve referred downlines (live query as secure robust fallback)
+        // Business Cycle progress fallback.
         try {
-          const userQuery = query(
-            collection(db, 'users'),
-            where('referredBy', '==', userProfile.uid),
+          const cycleSnap = await getDoc(
+            doc(db, 'business_cycles', userProfile.uid),
           )
-          const userSnap = await getDocs(userQuery)
-          directPartners = userSnap.size
+          if (cycleSnap.exists()) {
+            const cycle = cycleSnap.data() as BusinessCycle
+            const cap = toFiniteMetric(cycle.earningsCapCC)
+            const earned = toFiniteMetric(cycle.currentQualifiedEarningsCC)
+            progress = cap > 0 ? (earned / cap) * 100 : 0
+          }
+        } catch (error) {
+          console.warn('Could not load Business Cycle progress', error)
+        }
 
-          userSnap.forEach((doc) => {
-            const u = doc.data()
-            if (u.role === 'Customer' || u.accountType === 'Customer') {
-              smartCustomers++
+        // CommissionService fallback supports older commission schemas.
+        try {
+          const commissionSummary =
+            (await CommissionService.getCommissionSummary(
+              userProfile.uid,
+            )) as unknown as Record<string, unknown>
+
+          directReferralCC = readMetric(commissionSummary, [
+            'totalDirectReferral',
+            'directReferralCC',
+            'directReferralBonusCC',
+          ])
+          indirectReferralCC = readMetric(commissionSummary, [
+            'totalIndirectReferral',
+            'indirectReferralCC',
+            'indirectReferralBonusCC',
+          ])
+          leadershipBonusCC = readMetric(commissionSummary, [
+            'totalLeadership',
+            'leadershipBonusCC',
+          ])
+          infinityBonusCC = readMetric(commissionSummary, [
+            'totalInfinity',
+            'infinityBonusCC',
+          ])
+          unilevelBonusCC = readMetric(commissionSummary, [
+            'totalUnilevel',
+            'unilevelBonusCC',
+            'productUnilevelBonusCC',
+          ])
+        } catch (error) {
+          console.warn('Could not load CommissionService summary', error)
+        }
+
+        // Current authoritative commission records override legacy summary
+        // fields when member-owned reads are available.
+        try {
+          const commissionQuery = query(
+            collection(db, 'commissions'),
+            where('earnerUid', '==', userProfile.uid),
+            limit(1000),
+          )
+          const commissionSnapshot = await getDocs(commissionQuery)
+
+          if (!commissionSnapshot.empty) {
+            let rawDirectReferralCC = 0
+            let rawIndirectReferralCC = 0
+            let rawLeadershipBonusCC = 0
+            let rawInfinityBonusCC = 0
+            let rawUnilevelBonusCC = 0
+
+            commissionSnapshot.forEach((commissionDocument) => {
+              const record = commissionDocument.data() as Record<
+                string,
+                unknown
+              >
+              const status = normalizeMetricText(record.status)
+              if (
+                status === 'notqualified' ||
+                status === 'flushed' ||
+                status === 'rejected' ||
+                status === 'cancelled'
+              ) {
+                return
+              }
+
+              const amountCC = readMetric(record, [
+                'creditedAmountCC',
+                'amountCC',
+                'amount',
+              ])
+              if (amountCC <= 0) return
+
+              const commissionType = normalizeMetricText(record.commissionType)
+              const referralType = normalizeMetricText(record.referralBonusType)
+
+              if (commissionType === 'referralbonus') {
+                if (referralType === 'direct') {
+                  rawDirectReferralCC += amountCC
+                } else {
+                  rawIndirectReferralCC += amountCC
+                }
+              } else if (commissionType === 'leadershipbonus') {
+                rawLeadershipBonusCC += amountCC
+              } else if (
+                commissionType === 'unilevelbonus' ||
+                commissionType === 'productunilevelbonus'
+              ) {
+                rawUnilevelBonusCC += amountCC
+              } else if (commissionType === 'infinitybonus') {
+                rawInfinityBonusCC += amountCC
+              }
+            })
+
+            directReferralCC = rawDirectReferralCC
+            indirectReferralCC = rawIndirectReferralCC
+            leadershipBonusCC = rawLeadershipBonusCC
+            infinityBonusCC = rawInfinityBonusCC
+            unilevelBonusCC = rawUnilevelBonusCC
+          }
+        } catch (error) {
+          console.warn('Could not aggregate member commission records', error)
+        }
+
+        // Direct-network fallback. The server dashboard summary should supply
+        // complete 15-level totals; the browser fallback intentionally remains
+        // direct-only to avoid broad private genealogy reads.
+        try {
+          const directQueries = [
+            query(
+              collection(db, 'users'),
+              where('referredBy', '==', userProfile.uid),
+              limit(250),
+            ),
+            query(
+              collection(db, 'users'),
+              where('sponsorUid', '==', userProfile.uid),
+              limit(250),
+            ),
+          ]
+
+          if (userProfile.sponsorCode) {
+            directQueries.push(
+              query(
+                collection(db, 'users'),
+                where('referredBy', '==', userProfile.sponsorCode),
+                limit(250),
+              ),
+            )
+          }
+
+          const directResults = await Promise.allSettled(
+            directQueries.map((directQuery) => getDocs(directQuery)),
+          )
+          const uniqueDirectMembers = new Map<string, Record<string, unknown>>()
+
+          directResults.forEach((result) => {
+            if (result.status !== 'fulfilled') return
+            result.value.docs.forEach((memberDocument) => {
+              uniqueDirectMembers.set(
+                memberDocument.id,
+                memberDocument.data() as Record<string, unknown>,
+              )
+            })
+          })
+
+          directPartners = uniqueDirectMembers.size
+          totalNetworkMembers = directPartners
+
+          uniqueDirectMembers.forEach((member) => {
+            if (isAffiliateNetworkRecord(member)) {
+              affiliateBusiness += 1
+            } else if (isSmartCustomerNetworkRecord(member)) {
+              smartCustomers += 1
+            } else if (isBasicCustomerNetworkRecord(member)) {
+              customers += 1
+            }
+
+            if (isActiveNetworkRecord(member)) {
+              activeNetworkMembers += 1
             } else {
-              affiliateBusiness++
+              inactiveNetworkMembers += 1
             }
           })
-        } catch (err) {
-          console.warn('Could not fetch referred downline nodes', err)
+        } catch (error) {
+          console.warn('Could not load direct network fallback', error)
         }
 
-        // Apply pre-calculated summary metrics if present, overriding fallbacks
-        if (summarySnap.exists()) {
-          const s = summarySnap.data()
-          if (s.rankProgressPercent !== undefined)
-            progress = s.rankProgressPercent
-          if (s.directAffiliateCount !== undefined)
-            directPartners = s.directAffiliateCount
-          if (s.smartCustomerCount !== undefined)
-            smartCustomers = s.smartCustomerCount
-          if (s.affiliateBusinessCount !== undefined)
-            affiliateBusiness = s.affiliateBusinessCount
-          if (s.personalVolumeCC !== undefined) productVol = s.personalVolumeCC
-          else if (s.personalSalesCC !== undefined)
-            productVol = s.personalSalesCC
-          if (s.groupVolumeCC !== undefined) packageVol = s.groupVolumeCC
-          if (s.referralBonusesCC !== undefined) refBonus = s.referralBonusesCC
-          if (s.leadershipBonusCC !== undefined) leadBonus = s.leadershipBonusCC
-          if (s.infinityBonusCC !== undefined) infBonus = s.infinityBonusCC
-          if (s.marketingSupportCC !== undefined)
-            marketSupport = s.marketingSupportCC
+        // Server-authored summary overrides every available fallback metric.
+        if (summaryData) {
+          progress = readMetric(
+            summaryData,
+            ['rankProgressPercent', 'progressPercent'],
+            progress,
+          )
+          directPartners = readMetric(
+            summaryData,
+            [
+              'directPartnerCount',
+              'directPartners',
+              'directReferralCount',
+              'directAffiliateCount',
+            ],
+            directPartners,
+          )
+          totalNetworkMembers = readMetric(
+            summaryData,
+            [
+              'totalNetworkMembers',
+              'totalNetworkMemberCount',
+              'totalDownlineCount',
+              'networkSize',
+            ],
+            totalNetworkMembers,
+          )
+          customers = readMetric(
+            summaryData,
+            ['customerCount', 'basicCustomerCount'],
+            customers,
+          )
+          smartCustomers = readMetric(
+            summaryData,
+            ['smartCustomerCount', 'smartCustomers'],
+            smartCustomers,
+          )
+          affiliateBusiness = readMetric(
+            summaryData,
+            ['affiliateBusinessCount', 'affiliateCount', 'affiliateBusinesses'],
+            affiliateBusiness,
+          )
+          activeNetworkMembers = readMetric(
+            summaryData,
+            ['activeNetworkMembers', 'activeMemberCount'],
+            activeNetworkMembers,
+          )
+          inactiveNetworkMembers = readMetric(
+            summaryData,
+            [
+              'inactiveNetworkMembers',
+              'inactiveMemberCount',
+              'pausedMemberCount',
+            ],
+            inactiveNetworkMembers,
+          )
+          productVolumeCC = readMetric(
+            summaryData,
+            [
+              'personalProductVolumeCC',
+              'productVolumeCC',
+              'personalVolumeCC',
+              'personalSalesCC',
+            ],
+            productVolumeCC,
+          )
+          groupProductVolumeCC = readMetric(
+            summaryData,
+            ['groupProductVolumeCC', 'networkProductVolumeCC'],
+            groupProductVolumeCC,
+          )
+          packageVolumeCC = readMetric(
+            summaryData,
+            [
+              'groupPackageVolumeCC',
+              'packageVolumeCC',
+              'groupVolumeCC',
+              'packageActivationVolumeCC',
+            ],
+            packageVolumeCC,
+          )
+          directReferralCC = readMetric(
+            summaryData,
+            [
+              'directReferralCC',
+              'directReferralBonusCC',
+              'totalDirectReferralCC',
+              'totalDirectReferral',
+            ],
+            directReferralCC,
+          )
+          indirectReferralCC = readMetric(
+            summaryData,
+            [
+              'indirectReferralCC',
+              'indirectReferralBonusCC',
+              'totalIndirectReferralCC',
+              'totalIndirectReferral',
+            ],
+            indirectReferralCC,
+          )
+          leadershipBonusCC = readMetric(
+            summaryData,
+            ['leadershipBonusCC', 'totalLeadershipCC', 'totalLeadership'],
+            leadershipBonusCC,
+          )
+          infinityBonusCC = readMetric(
+            summaryData,
+            ['infinityBonusCC', 'totalInfinityCC', 'totalInfinity'],
+            infinityBonusCC,
+          )
+          unilevelBonusCC = readMetric(
+            summaryData,
+            [
+              'unilevelBonusCC',
+              'productUnilevelBonusCC',
+              'totalUnilevelCC',
+              'totalUnilevel',
+            ],
+            unilevelBonusCC,
+          )
+          marketingSupportCC = readMetric(
+            summaryData,
+            [
+              'marketingSupportCC',
+              'marketingSupportAllocationCC',
+              'msaCC',
+              'msaTotalCC',
+            ],
+            marketingSupportCC,
+          )
+          summaryUpdatedAt = readTimestampLabel(
+            summaryData.updatedAt ||
+              summaryData.generatedAt ||
+              summaryData.calculatedAt,
+          )
         }
 
-        // Final safe clamp
+        // Ensure totals remain internally coherent when older summaries omit
+        // aggregate fields.
+        const classifiedNetworkTotal =
+          customers + smartCustomers + affiliateBusiness
+        if (totalNetworkMembers <= 0 && classifiedNetworkTotal > 0) {
+          totalNetworkMembers = classifiedNetworkTotal
+        }
+        if (
+          activeNetworkMembers <= 0 &&
+          inactiveNetworkMembers <= 0 &&
+          totalNetworkMembers > 0
+        ) {
+          activeNetworkMembers = totalNetworkMembers
+        }
+
         progress = Math.max(0, Math.min(100, progress))
+        const totalNetworkEarningsCC =
+          directReferralCC +
+          indirectReferralCC +
+          unilevelBonusCC +
+          leadershipBonusCC +
+          infinityBonusCC +
+          marketingSupportCC
 
-        setData({
-          progressPercent: progress,
-          infinityBonus: RANK_STYLE_CONFIGS[rankKey]?.infinityBonus || '0.0%',
-          directPartners,
-          smartCustomers,
-          affiliateBusiness,
-          productVolumeCC: productVol,
-          packageVolumeCC: packageVol,
-          referralBonusesCC: refBonus,
-          leadershipBonusCC: leadBonus,
-          infinityBonusCC: infBonus,
-          marketingSupportCC: marketSupport,
-          nextRankLabel: RANK_STYLE_CONFIGS[rankKey]?.nextRank || '',
-        })
-      } catch (err) {
-        console.error('Error loading dashboard performance cards details:', err)
+        if (!cancelled) {
+          setData({
+            progressPercent: progress,
+            infinityBonus: RANK_STYLE_CONFIGS[rankKey]?.infinityBonus || '0.0%',
+            directPartners,
+            totalNetworkMembers,
+            customers,
+            smartCustomers,
+            affiliateBusiness,
+            activeNetworkMembers,
+            inactiveNetworkMembers,
+            productVolumeCC,
+            groupProductVolumeCC,
+            packageVolumeCC,
+            directReferralCC,
+            indirectReferralCC,
+            leadershipBonusCC,
+            infinityBonusCC,
+            unilevelBonusCC,
+            marketingSupportCC,
+            totalNetworkEarningsCC,
+            nextRankLabel: RANK_STYLE_CONFIGS[rankKey]?.nextRank || '',
+            summaryUpdatedAt,
+          })
+        }
+      } catch (error) {
+        console.error(
+          'Error loading dashboard performance card details:',
+          error,
+        )
       } finally {
-        setLoading(false)
+        if (!cancelled) setLoading(false)
       }
     }
 
-    loadPerformanceData()
-  }, [userProfile?.uid, userProfile?.packageLevel, rankKey])
+    void loadPerformanceData()
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    userProfile?.uid,
+    userProfile?.packageLevel,
+    userProfile?.sponsorCode,
+    rankKey,
+  ])
 
   // Click handler for VIEW DETAILS button
   const handleViewDetails = async () => {
@@ -763,17 +1265,32 @@ export default function DashboardPerformanceCards({
     }
   }
 
-  // If loading, render exact sized skeleton to prevent layout jumps
+  // If loading, render a skeleton that preserves the final dashboard geometry.
   if (loading) {
-    const isAffiliateMode = userProfile?.accountType === 'Affiliate'
+    const isAffiliateMode =
+      normalizeMetricText(userProfile?.accountType) === 'affiliate'
+
+    if (isAffiliateMode) {
+      return (
+        <div className='w-full space-y-6 animate-pulse'>
+          {/* Row 1 — Business Cycle Progress */}
+          <div className='h-36 rounded-3xl border border-zinc-850 bg-zinc-900/40' />
+
+          {/* Row 2 — Activities + performance summary */}
+          <div className='grid grid-cols-1 items-stretch gap-6 xl:grid-cols-[minmax(0,1.65fr)_minmax(340px,1fr)]'>
+            <div className='min-h-[360px] rounded-3xl border border-zinc-850 bg-zinc-900/40' />
+            <div className='flex min-h-[360px] flex-col gap-6'>
+              <div className='h-52 rounded-3xl border border-zinc-850 bg-zinc-900/40' />
+              <div className='min-h-[260px] flex-1 rounded-3xl border border-zinc-850 bg-zinc-900/40' />
+            </div>
+          </div>
+        </div>
+      )
+    }
+
     return (
-      <div
-        className={`grid grid-cols-1 ${isAffiliateMode ? 'md:grid-cols-2' : ''} gap-6 animate-pulse w-full mb-8`}
-      >
-        <div className='h-56 bg-zinc-900/40 rounded-3xl border border-zinc-850' />
-        {isAffiliateMode && (
-          <div className='h-56 bg-zinc-900/40 rounded-3xl border border-zinc-850' />
-        )}
+      <div className='grid w-full animate-pulse grid-cols-1 gap-6 mb-8'>
+        <div className='h-56 rounded-3xl border border-zinc-850 bg-zinc-900/40' />
       </div>
     )
   }
@@ -832,33 +1349,31 @@ export default function DashboardPerformanceCards({
     )
   }
 
-  if (renderRecentActivities && isAffiliateAccount) {
+  if (
+    renderBusinessCycleProgress &&
+    renderRecentActivities &&
+    isAffiliateAccount
+  ) {
     return (
-      <div className='w-full'>
+      <div className='w-full space-y-6'>
+        {/* ROW 1 — Business Cycle Progress spans the complete dashboard width. */}
+        <section className='w-full' aria-label='Business Cycle progress'>
+          {renderBusinessCycleProgress()}
+        </section>
+
+        {/* ROW 2 — Activities on the left; Rank and Network stacked on the right. */}
         <section
-          className='
-            grid
-            grid-cols-1
-            gap-6
-            xl:grid-cols-[minmax(0,1.6fr)_minmax(340px,1fr)]
-            items-start
-          '
+          className='grid grid-cols-1 items-stretch gap-6 xl:grid-cols-[minmax(0,1.65fr)_minmax(340px,1fr)]'
+          aria-label='Affiliate dashboard performance'
         >
-          {/* LEFT COLUMN — Column 1: Recent Account Activities */}
-          <div className='min-w-0 xl:order-1 order-3'>
+          {/* First column — matches the complete height of the right column. */}
+          <div className='min-w-0 h-full [&>*]:h-full'>
             {renderRecentActivities()}
           </div>
 
-          {/* RIGHT COLUMN — Column 2: Affiliate Rank Card & Network Summary Card stacked vertically */}
+          {/* Second column — Rank first, Network Summary second. */}
           <aside
-            className='
-              min-w-0
-              flex
-              flex-col
-              gap-6
-              xl:order-2
-              order-1
-            '
+            className='min-w-0 flex h-full flex-col gap-6'
             aria-label='Affiliate performance summary'
           >
             {showAffiliateCard && (
@@ -870,12 +1385,14 @@ export default function DashboardPerformanceCards({
             )}
 
             {showNetworkCard && (
-              <DashboardNetworkCard
-                variant='affiliate'
-                showMarketingSupport={showMarketingSupport}
-                data={data}
-                onViewDetails={handleViewDetails}
-              />
+              <div className='flex-1 min-h-0 [&>*]:h-full'>
+                <DashboardNetworkCard
+                  variant='affiliate'
+                  showMarketingSupport={showMarketingSupport}
+                  data={data}
+                  onViewDetails={handleViewDetails}
+                />
+              </div>
             )}
           </aside>
         </section>

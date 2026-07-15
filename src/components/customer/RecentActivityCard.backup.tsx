@@ -22,15 +22,14 @@ import { useCCSettings } from '../../context/CCSettingsContext'
 
 type AccountType = 'Customer' | 'Smart Customer' | 'Affiliate'
 
-type ActivityType =
-  | 'CASHIN'
-  | 'CASHOUT'
-  | 'ORDER'
-  | 'PAYOUT'
-  | 'P2P_RECEIVE'
-  | 'P2P_SEND'
+type ActivityType = 'CASHIN' | 'CASHOUT' | 'ORDER' | 'PAYOUT'
 
-export type ActivityFilter = 'earnings' | 'deposits' | 'withdrawals' | 'orders'
+export type ActivityFilter =
+  | 'all'
+  | 'payouts'
+  | 'cashins'
+  | 'cashouts'
+  | 'orders'
 
 type LayoutVariant = 'compact' | 'wide'
 
@@ -40,13 +39,7 @@ interface RecentActivityCardProps {
   cashins?: unknown[]
   cashouts?: unknown[]
   orders?: unknown[]
-  commissions?: unknown[]
   payouts?: unknown[]
-  p2pReceived?: unknown[]
-  p2pSent?: unknown[]
-  p2pTransfers?: unknown[]
-  walletTransactions?: unknown[]
-  currentUid?: string
 
   accountType?: AccountType
   layoutVariant?: LayoutVariant
@@ -74,17 +67,21 @@ interface FilterDefinition {
 }
 
 const FILTERS: Record<ActivityFilter, FilterDefinition> = {
-  earnings: {
-    id: 'earnings',
-    label: 'Recent Earnings',
+  all: {
+    id: 'all',
+    label: 'All',
   },
-  deposits: {
-    id: 'deposits',
-    label: 'Deposits',
+  payouts: {
+    id: 'payouts',
+    label: 'Recent Payouts',
   },
-  withdrawals: {
-    id: 'withdrawals',
-    label: 'Withdrawals',
+  cashins: {
+    id: 'cashins',
+    label: 'Cash-Ins',
+  },
+  cashouts: {
+    id: 'cashouts',
+    label: 'Cash-Outs',
   },
   orders: {
     id: 'orders',
@@ -92,12 +89,13 @@ const FILTERS: Record<ActivityFilter, FilterDefinition> = {
   },
 }
 
-const CUSTOMER_ACTIVITY_TABS: readonly ActivityFilter[] = ['deposits', 'orders']
+const CUSTOMER_ACTIVITY_TABS: readonly ActivityFilter[] = ['cashins', 'orders']
 
 const AFFILIATE_ACTIVITY_TABS: readonly ActivityFilter[] = [
-  'earnings',
-  'deposits',
-  'withdrawals',
+  'all',
+  'payouts',
+  'cashins',
+  'cashouts',
   'orders',
 ]
 
@@ -122,150 +120,9 @@ function readNumber(...values: unknown[]): number {
     if (typeof value === 'number' && Number.isFinite(value)) {
       return value
     }
-
-    if (typeof value === 'string' && value.trim()) {
-      const parsed = Number(value)
-
-      if (Number.isFinite(parsed)) {
-        return parsed
-      }
-    }
   }
 
   return 0
-}
-
-function readDate(...values: unknown[]): string {
-  for (const value of values) {
-    if (typeof value === 'string' && value.trim()) {
-      return value.trim()
-    }
-
-    if (typeof value === 'number' && Number.isFinite(value)) {
-      return new Date(value).toISOString()
-    }
-
-    if (value instanceof Date && !Number.isNaN(value.getTime())) {
-      return value.toISOString()
-    }
-
-    if (typeof value === 'object' && value !== null) {
-      const timestamp = value as {
-        toDate?: () => Date
-        seconds?: number
-        _seconds?: number
-      }
-
-      if (typeof timestamp.toDate === 'function') {
-        const date = timestamp.toDate()
-
-        if (!Number.isNaN(date.getTime())) {
-          return date.toISOString()
-        }
-      }
-
-      const seconds = readNumber(timestamp.seconds, timestamp._seconds)
-
-      if (seconds > 0) {
-        return new Date(seconds * 1000).toISOString()
-      }
-    }
-  }
-
-  return ''
-}
-
-function normalizeToken(value: string): string {
-  return value.trim().toUpperCase().replaceAll('-', '_').replaceAll(' ', '_')
-}
-
-function isCompletedP2PRecord(value: unknown): boolean {
-  const transfer = toRecord(value)
-  const status = normalizeToken(
-    readString(transfer.status, transfer.transferStatus, transfer.ledgerStatus),
-  )
-
-  return (
-    !status ||
-    status === 'COMPLETED' ||
-    status === 'SUCCESS' ||
-    status === 'SUCCESSFUL' ||
-    status === 'SUCCEEDED' ||
-    status === 'SETTLED' ||
-    status === 'POSTED' ||
-    status === 'APPROVED'
-  )
-}
-
-function getP2PRecordId(value: unknown, index: number): string {
-  const transfer = toRecord(value)
-  const metadata = toRecord(transfer.metadata)
-
-  const explicitId = readString(
-    transfer.transferId,
-    transfer.requestId,
-    transfer.referenceId,
-    transfer.referenceNumber,
-    transfer.transactionId,
-    transfer.idempotencyKey,
-    transfer.id,
-    metadata.transferId,
-    metadata.requestId,
-    metadata.referenceId,
-    metadata.transactionId,
-    metadata.idempotencyKey,
-  )
-
-  if (explicitId) {
-    return explicitId
-  }
-
-  const senderUid = readString(
-    transfer.senderUid,
-    transfer.fromUid,
-    metadata.senderUid,
-    metadata.fromUid,
-  )
-  const recipientUid = readString(
-    transfer.recipientUid,
-    transfer.receiverUid,
-    transfer.toUid,
-    metadata.recipientUid,
-    metadata.receiverUid,
-    metadata.toUid,
-  )
-  const amountCC = readNumber(
-    transfer.amountCC,
-    transfer.transferAmountCC,
-    transfer.amount,
-    metadata.amountCC,
-  )
-  const date = readDate(
-    transfer.completedAt,
-    transfer.createdAt,
-    transfer.timestamp,
-    metadata.completedAt,
-    metadata.createdAt,
-  )
-
-  return [senderUid, recipientUid, amountCC, date].some(Boolean)
-    ? `p2p-${senderUid}-${recipientUid}-${amountCC}-${date}`
-    : `p2p-transfer-${index}`
-}
-
-function dedupeP2PRecords(records: unknown[]): unknown[] {
-  const seen = new Set<string>()
-
-  return records.filter((record, index) => {
-    const id = getP2PRecordId(record, index)
-
-    if (seen.has(id)) {
-      return false
-    }
-
-    seen.add(id)
-    return true
-  })
 }
 
 function normalizeCommissionName(value: string): string {
@@ -332,8 +189,7 @@ function formatDateTime(value: string): string {
 }
 
 function formatCC(amount: number, type: ActivityType): string {
-  const prefix =
-    type === 'CASHOUT' || type === 'P2P_SEND' || type === 'ORDER' ? '-' : '+'
+  const prefix = type === 'CASHOUT' || type === 'ORDER' ? '-' : '+'
 
   return `${prefix}${amount.toLocaleString('en-PH', {
     minimumFractionDigits: 2,
@@ -351,11 +207,11 @@ function formatPHP(amount: number): string {
 }
 
 function getActivityIcon(activity: NormalizedActivity) {
-  if (activity.type === 'CASHIN' || activity.type === 'P2P_RECEIVE') {
+  if (activity.type === 'CASHIN') {
     return <ArrowDownToLine className='h-4 w-4' />
   }
 
-  if (activity.type === 'CASHOUT' || activity.type === 'P2P_SEND') {
+  if (activity.type === 'CASHOUT') {
     return <ArrowUpFromLine className='h-4 w-4' />
   }
 
@@ -395,7 +251,6 @@ function getActivityColors(type: ActivityType): {
 } {
   switch (type) {
     case 'CASHIN':
-    case 'P2P_RECEIVE':
       return {
         dot: 'bg-emerald-500',
         icon: 'bg-emerald-500/10 text-emerald-400',
@@ -403,7 +258,6 @@ function getActivityColors(type: ActivityType): {
       }
 
     case 'CASHOUT':
-    case 'P2P_SEND':
       return {
         dot: 'bg-rose-500',
         icon: 'bg-rose-500/10 text-rose-400',
@@ -431,36 +285,33 @@ function getModalTitle(type: ActivityType): string {
     case 'CASHIN':
       return 'Cash-In Ledger'
 
-    case 'P2P_RECEIVE':
-      return 'Received P2P Transfer'
-
     case 'CASHOUT':
       return 'Cash-Out Ledger'
-
-    case 'P2P_SEND':
-      return 'Sent P2P Transfer'
 
     case 'ORDER':
       return 'E-Commerce Order Ledger'
 
     case 'PAYOUT':
-      return 'Commission Earnings Ledger'
+      return 'Commission Payout Ledger'
   }
 }
 
 function getEmptyDescription(filter: ActivityFilter): string {
   switch (filter) {
-    case 'earnings':
-      return 'No commission earnings have been recorded yet.'
+    case 'payouts':
+      return 'No commission payouts have been recorded yet.'
 
-    case 'deposits':
-      return 'No Cash-In or received P2P deposits have been recorded yet.'
+    case 'cashins':
+      return 'No Cash-In requests have been recorded yet.'
 
-    case 'withdrawals':
-      return 'No Cash-Out or sent P2P withdrawals have been recorded yet.'
+    case 'cashouts':
+      return 'No Cash-Out requests have been recorded yet.'
 
     case 'orders':
       return 'No product orders have been recorded yet.'
+
+    case 'all':
+      return 'No recent account activities have been recorded yet.'
   }
 }
 
@@ -468,13 +319,7 @@ export default function RecentActivityCard({
   cashins = [],
   cashouts = [],
   orders = [],
-  commissions = [],
   payouts = [],
-  p2pReceived = [],
-  p2pSent = [],
-  p2pTransfers = [],
-  walletTransactions = [],
-  currentUid = '',
   accountType = 'Customer',
   layoutVariant = 'compact',
   pageSize,
@@ -511,7 +356,7 @@ export default function RecentActivityCard({
   }, [accountType, visibleTabs])
 
   const [filter, setFilter] = useState<ActivityFilter>(
-    () => resolvedVisibleFilters[0] ?? 'deposits',
+    () => resolvedVisibleFilters[0] ?? 'cashins',
   )
 
   const [selectedActivity, setSelectedActivity] =
@@ -521,7 +366,7 @@ export default function RecentActivityCard({
 
   useEffect(() => {
     if (!resolvedVisibleFilters.includes(filter)) {
-      setFilter(resolvedVisibleFilters[0] ?? 'deposits')
+      setFilter(resolvedVisibleFilters[0] ?? 'cashins')
     }
   }, [filter, resolvedVisibleFilters])
 
@@ -543,7 +388,8 @@ export default function RecentActivityCard({
             'Approved payment channel'
           }`,
           referenceNumber:
-            readString(cashin.requestId, cashin.id) || 'Unavailable',
+            readString(cashin.referenceNumber, cashin.requestId, cashin.id) ||
+            'Unavailable',
           status: readString(cashin.status) || 'Pending',
           amountCC: readNumber(cashin.amountCC, cashin.computedCC),
           amountPhp: readNumber(cashin.amountPHP, cashin.amountPhp),
@@ -617,21 +463,16 @@ export default function RecentActivityCard({
     [displayReferenceRatePHP, orders],
   )
 
-  const commissionRecords = useMemo(
-    () => [...commissions, ...payouts],
-    [commissions, payouts],
-  )
-
   const normalizedPayouts = useMemo<NormalizedActivity[]>(
     () =>
-      commissionRecords.map((item, index) => {
+      payouts.map((item, index) => {
         const payout = toRecord(item)
 
-        const commissionType =
-          readString(payout.commissionType, payout.type) || 'Commission'
+        const commissionType = readString(payout.commissionType) || 'Commission'
 
         const title = normalizeCommissionName(commissionType)
-        const amountCC = readNumber(payout.amountCC, payout.amount)
+
+        const amountCC = readNumber(payout.amountCC)
 
         return {
           id: readString(payout.id, payout.commissionId) || `payout-${index}`,
@@ -645,315 +486,69 @@ export default function RecentActivityCard({
           amountPhp:
             readNumber(payout.phpEquivalent) ||
             amountCC * displayReferenceRatePHP,
-          date: readString(
-            payout.createdAt,
-            payout.completedAt,
-            payout.updatedAt,
-          ),
+          date: readString(payout.createdAt, payout.completedAt),
           raw: payout,
         }
       }),
-    [commissionRecords, displayReferenceRatePHP],
+    [displayReferenceRatePHP, payouts],
   )
 
-  const classifiedP2PTransfers = useMemo(() => {
-    const received: unknown[] = []
-    const sent: unknown[] = []
-    const sharedRecords = [...p2pTransfers, ...walletTransactions]
+  const combinedActivities = useMemo(() => {
+    const activityList = [
+      ...normalizedCashins,
+      ...normalizedCashouts,
+      ...normalizedOrders,
+    ]
 
-    sharedRecords.forEach((item) => {
-      if (!isCompletedP2PRecord(item)) {
-        return
-      }
+    if (accountType === 'Affiliate') {
+      activityList.push(...normalizedPayouts)
+    }
 
-      const transfer = toRecord(item)
-      const metadata = toRecord(transfer.metadata)
-      const recipientUid = readString(
-        transfer.recipientUid,
-        transfer.receiverUid,
-        transfer.toUid,
-        transfer.creditUid,
-        metadata.recipientUid,
-        metadata.receiverUid,
-        metadata.toUid,
-      )
-      const senderUid = readString(
-        transfer.senderUid,
-        transfer.fromUid,
-        transfer.debitUid,
-        metadata.senderUid,
-        metadata.fromUid,
-      )
-      const ownerUid = readString(
-        transfer.userUid,
-        transfer.ownerUid,
-        transfer.accountUid,
-        transfer.uid,
-        metadata.userUid,
-        metadata.ownerUid,
-      )
-      const recordType = normalizeToken(
-        readString(
-          transfer.activityType,
-          transfer.transactionType,
-          transfer.ledgerType,
-          transfer.category,
-          transfer.type,
-          metadata.activityType,
-          metadata.transactionType,
-          metadata.category,
-          metadata.type,
-        ),
-      )
-      const direction = normalizeToken(
-        readString(
-          transfer.direction,
-          transfer.entryType,
-          transfer.flow,
-          metadata.direction,
-          metadata.entryType,
-          metadata.flow,
-        ),
-      )
-      const isP2PType =
-        recordType.includes('P2P') ||
-        recordType.includes('PEER_TO_PEER') ||
-        recordType.includes('MEMBER_TRANSFER')
-
-      const isReceivedType =
-        (isP2PType &&
-          (recordType.includes('RECEIV') || recordType.includes('CREDIT'))) ||
-        (isP2PType &&
-          (direction === 'CREDIT' ||
-            direction === 'IN' ||
-            direction === 'INCOMING' ||
-            direction === 'RECEIVE' ||
-            direction === 'RECEIVED'))
-
-      const isSentType =
-        (isP2PType &&
-          (recordType.includes('SEND') ||
-            recordType.includes('SENT') ||
-            recordType.includes('DEBIT'))) ||
-        (isP2PType &&
-          (direction === 'DEBIT' ||
-            direction === 'OUT' ||
-            direction === 'OUTGOING' ||
-            direction === 'SEND' ||
-            direction === 'SENT'))
-
-      if (
-        currentUid &&
-        (recipientUid === currentUid ||
-          (ownerUid === currentUid && isReceivedType))
-      ) {
-        received.push(item)
-      }
-
-      if (
-        currentUid &&
-        (senderUid === currentUid || (ownerUid === currentUid && isSentType))
-      ) {
-        sent.push(item)
-      }
-    })
-
-    return { received, sent }
-  }, [currentUid, p2pTransfers, walletTransactions])
-
-  const allP2PReceived = useMemo(
-    () =>
-      dedupeP2PRecords([
-        ...p2pReceived.filter(isCompletedP2PRecord),
-        ...classifiedP2PTransfers.received,
-      ]),
-    [classifiedP2PTransfers.received, p2pReceived],
-  )
-
-  const allP2PSent = useMemo(
-    () =>
-      dedupeP2PRecords([
-        ...p2pSent.filter(isCompletedP2PRecord),
-        ...classifiedP2PTransfers.sent,
-      ]),
-    [classifiedP2PTransfers.sent, p2pSent],
-  )
-
-  const normalizedP2PReceived = useMemo<NormalizedActivity[]>(
-    () =>
-      allP2PReceived.map((item, index) => {
-        const transfer = toRecord(item)
-        const metadata = toRecord(transfer.metadata)
-        const amountCC = readNumber(
-          transfer.amountCC,
-          transfer.transferAmountCC,
-          transfer.creditAmountCC,
-          transfer.netAmountCC,
-          transfer.amount,
-          metadata.amountCC,
-          metadata.transferAmountCC,
-        )
-        const senderLabel = readString(
-          transfer.senderMemberId,
-          transfer.senderName,
-          transfer.fromMemberId,
-          metadata.senderMemberId,
-          metadata.senderName,
-          metadata.fromMemberId,
-        )
-        const transferId = getP2PRecordId(item, index)
-
-        return {
-          id: transferId,
-          type: 'P2P_RECEIVE',
-          title: 'P2P Transfer Received',
-          subtitle: senderLabel
-            ? `From ${senderLabel}`
-            : 'Received from member',
-          referenceNumber: transferId,
-          status:
-            readString(
-              transfer.status,
-              transfer.transferStatus,
-              transfer.ledgerStatus,
-            ) || 'Completed',
-          amountCC,
-          amountPhp:
-            readNumber(
-              transfer.phpEquivalent,
-              transfer.amountPhp,
-              transfer.amountPHP,
-              metadata.phpEquivalent,
-            ) || amountCC * displayReferenceRatePHP,
-          date: readDate(
-            transfer.completedAt,
-            transfer.createdAt,
-            transfer.timestamp,
-            transfer.updatedAt,
-            metadata.completedAt,
-            metadata.createdAt,
-          ),
-          raw: transfer,
-        }
-      }),
-    [allP2PReceived, displayReferenceRatePHP],
-  )
-
-  const normalizedP2PSent = useMemo<NormalizedActivity[]>(
-    () =>
-      allP2PSent.map((item, index) => {
-        const transfer = toRecord(item)
-        const metadata = toRecord(transfer.metadata)
-        const transferAmountCC = readNumber(
-          transfer.amountCC,
-          transfer.transferAmountCC,
-          transfer.debitAmountCC,
-          transfer.amount,
-          metadata.amountCC,
-          metadata.transferAmountCC,
-        )
-        const feeCC = readNumber(
-          transfer.platformTransferFeeCC,
-          transfer.transferFeeCC,
-          transfer.feeCC,
-          transfer.fee,
-          metadata.platformTransferFeeCC,
-          metadata.transferFeeCC,
-          metadata.feeCC,
-        )
-        const totalDebitCC =
-          readNumber(
-            transfer.totalDebitCC,
-            transfer.totalAmountCC,
-            transfer.grossDebitCC,
-            metadata.totalDebitCC,
-          ) || transferAmountCC + feeCC
-        const recipientLabel = readString(
-          transfer.recipientMemberId,
-          transfer.recipientName,
-          transfer.toMemberId,
-          metadata.recipientMemberId,
-          metadata.recipientName,
-          metadata.toMemberId,
-        )
-        const transferId = getP2PRecordId(item, index)
-
-        return {
-          id: transferId,
-          type: 'P2P_SEND',
-          title: 'P2P Transfer Sent',
-          subtitle: recipientLabel
-            ? `To ${recipientLabel}${feeCC > 0 ? ` • Platform Transfer Fee: ${feeCC.toFixed(2)} CC` : ''}`
-            : `Sent to member${feeCC > 0 ? ` • Platform Transfer Fee: ${feeCC.toFixed(2)} CC` : ''}`,
-          referenceNumber: transferId,
-          status:
-            readString(
-              transfer.status,
-              transfer.transferStatus,
-              transfer.ledgerStatus,
-            ) || 'Completed',
-          amountCC: totalDebitCC,
-          amountPhp:
-            readNumber(
-              transfer.totalDebitPhp,
-              transfer.totalDebitPHP,
-              transfer.phpEquivalent,
-              metadata.totalDebitPhp,
-              metadata.phpEquivalent,
-            ) || totalDebitCC * displayReferenceRatePHP,
-          date: readDate(
-            transfer.completedAt,
-            transfer.createdAt,
-            transfer.timestamp,
-            transfer.updatedAt,
-            metadata.completedAt,
-            metadata.createdAt,
-          ),
-          raw: transfer,
-        }
-      }),
-    [allP2PSent, displayReferenceRatePHP],
-  )
-
-  const filteredActivities = useMemo(() => {
-    const sortNewestFirst = (
-      first: NormalizedActivity,
-      second: NormalizedActivity,
-    ) => {
+    return activityList.sort((first, second) => {
       const firstDate = new Date(first.date).getTime()
+
       const secondDate = new Date(second.date).getTime()
-      return (
-        (Number.isFinite(secondDate) ? secondDate : 0) -
-        (Number.isFinite(firstDate) ? firstDate : 0)
-      )
-    }
 
-    switch (filter) {
-      case 'earnings':
-        return [...normalizedPayouts].sort(sortNewestFirst)
+      const safeFirstDate = Number.isFinite(firstDate) ? firstDate : 0
 
-      case 'deposits':
-        return [...normalizedCashins, ...normalizedP2PReceived].sort(
-          sortNewestFirst,
-        )
+      const safeSecondDate = Number.isFinite(secondDate) ? secondDate : 0
 
-      case 'withdrawals':
-        return [...normalizedCashouts, ...normalizedP2PSent].sort(
-          sortNewestFirst,
-        )
-
-      case 'orders':
-        return [...normalizedOrders].sort(sortNewestFirst)
-    }
+      return safeSecondDate - safeFirstDate
+    })
   }, [
-    filter,
+    accountType,
     normalizedCashins,
     normalizedCashouts,
     normalizedOrders,
-    normalizedP2PReceived,
-    normalizedP2PSent,
     normalizedPayouts,
   ])
+
+  const filteredActivities = useMemo(() => {
+    switch (filter) {
+      case 'payouts':
+        return combinedActivities.filter(
+          (activity) => activity.type === 'PAYOUT',
+        )
+
+      case 'cashins':
+        return combinedActivities.filter(
+          (activity) => activity.type === 'CASHIN',
+        )
+
+      case 'cashouts':
+        return combinedActivities.filter(
+          (activity) => activity.type === 'CASHOUT',
+        )
+
+      case 'orders':
+        return combinedActivities.filter(
+          (activity) => activity.type === 'ORDER',
+        )
+
+      case 'all':
+        return combinedActivities
+    }
+  }, [combinedActivities, filter])
 
   const totalPages = Math.max(
     1,
@@ -989,7 +584,7 @@ export default function RecentActivityCard({
     <section
       aria-labelledby='recent-activities-title'
       className={[
-        'rounded-3xl border border-cyan-800 bg-[#0c0b0c] p-5 sm:p-6',
+        'rounded-3xl border border-zinc-800 bg-[#1D1F26] p-5 sm:p-6',
         layoutVariant === 'wide' ? 'space-y-6' : 'space-y-5',
         className,
       ].join(' ')}
@@ -1024,7 +619,7 @@ export default function RecentActivityCard({
                 aria-selected={selected}
                 onClick={() => setFilter(filterId)}
                 className={[
-                  'min-h-10 shrink-0 rounded-lg px-3 py-1 !text-[12px] leading-none !font-black uppercase transition-all',
+                  'min-h-10 shrink-0 rounded-lg px-3 py-1 text-[10px] font-extrabold uppercase transition-all',
                   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400',
                   selected
                     ? 'bg-cyan-500 text-black'
@@ -1221,11 +816,7 @@ export default function RecentActivityCard({
                 <DetailRow label='Operation' value={selectedActivity.title} />
 
                 <DetailRow
-                  label={
-                    selectedActivity.type === 'CASHIN'
-                      ? 'Request ID'
-                      : 'Reference / ID'
-                  }
+                  label='Reference / ID'
                   value={selectedActivity.referenceNumber}
                 />
 

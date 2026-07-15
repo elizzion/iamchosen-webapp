@@ -23,104 +23,10 @@ interface P2PTransferPageProps {
   userProfile: UserProfile | null
 }
 
-// Fail closed: P2P remains unavailable unless production explicitly enables it.
-const P2P_ENABLED = import.meta.env.VITE_P2P_ENABLED === 'true'
-
+// Chosen Credit transfers are enabled. Security, balance, fee, recipient,
+// atomicity, and idempotency validation remain enforced by the transfer service.
 export default function P2PTransferPage(props: P2PTransferPageProps) {
-  if (!P2P_ENABLED) {
-    return <P2PMaintenancePage onNavigate={props.onNavigate} />
-  }
-
   return <ActiveP2PTransferPage {...props} />
-}
-
-function P2PMaintenancePage({
-  onNavigate,
-}: Pick<P2PTransferPageProps, 'onNavigate'>) {
-  return (
-    <div
-      className='min-h-screen bg-black text-white selection:bg-gold selection:text-black'
-      id='p2p-transfer-maintenance-page'
-    >
-      <header className='sticky top-0 z-40 flex items-center justify-between border-b border-zinc-900 bg-black/80 px-6 py-4 backdrop-blur'>
-        <button
-          type='button'
-          onClick={() => onNavigate('dashboard')}
-          className='group flex items-center gap-2 text-xs uppercase tracking-wider text-zinc-400 transition-all hover:text-white'
-          id='back-to-wallet-btn'
-        >
-          <ArrowLeft className='h-4 w-4 transition-transform group-hover:-translate-x-1' />
-          Back to Wallet
-        </button>
-
-        <div className='flex items-center gap-2'>
-          <ChosenLogo size='sm' />
-          <div className='text-right'>
-            <span className='block text-[9px] leading-none tracking-widest text-zinc-500'>
-              I AM CHOSEN
-            </span>
-            <span className='mt-0.5 block text-[8px] uppercase leading-none tracking-[0.3em] text-gold'>
-              TRANSFER GATE
-            </span>
-          </div>
-        </div>
-      </header>
-
-      <main className='mx-auto flex min-h-[calc(100vh-73px)] w-full max-w-3xl items-center justify-center p-6 md:p-8'>
-        <motion.section
-          initial={{ opacity: 0, y: 16 }}
-          animate={{ opacity: 1, y: 0 }}
-          className='relative w-full overflow-hidden rounded-3xl border border-zinc-900 bg-zinc-950 p-6 text-center shadow-2xl md:p-10'
-          aria-labelledby='p2p-maintenance-title'
-        >
-          <div className='absolute inset-x-0 top-0 h-1 gold-gradient' />
-
-          <div className='mx-auto flex h-16 w-16 items-center justify-center rounded-full border border-gold/20 bg-gold/10 text-gold'>
-            <AlertTriangle className='h-8 w-8' />
-          </div>
-
-          <h1
-            id='p2p-maintenance-title'
-            className='mt-6 text-2xl font-black uppercase tracking-tight text-white'
-          >
-            Transfer Gate Maintenance
-          </h1>
-
-          <p className='mx-auto mt-3 max-w-xl text-sm leading-relaxed text-zinc-400'>
-            Chosen Credit transfers are temporarily unavailable while the
-            secured transfer service is being reviewed and prepared for
-            production deployment.
-          </p>
-
-          <div className='mx-auto mt-6 max-w-xl rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-4 text-left'>
-            <div className='flex items-start gap-3'>
-              <Check className='mt-0.5 h-5 w-5 shrink-0 text-emerald-400' />
-              <div>
-                <p className='text-sm font-bold text-emerald-300'>
-                  No credits will be deducted.
-                </p>
-                <p className='mt-1 text-xs leading-relaxed text-emerald-200/70'>
-                  The transfer form, recipient lookup, and transfer submission
-                  service are disabled until the backend passes security,
-                  atomicity, and idempotency verification.
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <button
-            type='button'
-            onClick={() => onNavigate('dashboard')}
-            className='mt-8 inline-flex w-full items-center justify-center gap-2 rounded-xl gold-gradient px-5 py-4 text-xs font-bold uppercase tracking-widest text-black transition-all hover:brightness-110 sm:w-auto'
-            id='maintenance-return-dashboard-btn'
-          >
-            <ArrowLeft className='h-4 w-4' />
-            Return to Dashboard
-          </button>
-        </motion.section>
-      </main>
-    </div>
-  )
 }
 
 function ActiveP2PTransferPage({

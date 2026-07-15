@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import {
   Wallet as WalletIcon,
   Award,
@@ -37,17 +37,16 @@ import {
   ChartCandlestick,
   ChartNoAxesCombined,
 } from 'lucide-react'
-import { db, createAuditLog } from '../firebase'
+import { db } from '../firebase'
+import { getApp } from 'firebase/app'
+import { getFunctions, httpsCallable } from 'firebase/functions'
 import {
   doc,
   getDoc,
-  setDoc,
-  updateDoc,
   collection,
   getDocs,
   query,
   where,
-  writeBatch,
   limit,
 } from 'firebase/firestore'
 import {
@@ -67,6 +66,104 @@ import { AIService } from '../services/ai/ai.service'
 import DashboardPerformanceCards from './dashboard/performance/DashboardPerformanceCards'
 import { AffiliateGrowthToolsSection } from './AffiliateGrowthTools'
 import ChosenWalletCard from './wallet/ChosenWalletCard'
+import MyDigitalWallet from './wallet/MyDigitalWallet'
+import RecentActivityCard from './customer/RecentActivityCard'
+
+type PackageActivationAction =
+  | 'INITIAL_ACTIVATION'
+  | 'PACKAGE_UPGRADE'
+  | 'BUSINESS_CYCLE_REACTIVATION'
+
+interface ActivatePackageRequest {
+  packageId: string
+  accountPath: 'Affiliate' | 'Smart Customer'
+  activationAction: PackageActivationAction
+  idempotencyKey: string
+}
+
+interface ActivatePackageResponse {
+  success?: boolean
+  message?: string
+  activationEventId?: string
+  packageTransactionId?: string
+  businessCycleId?: string
+  msaEntitlementId?: string
+  packageLevel?: string
+  walletDebitedCC?: number
+  walletBalanceAfterCC?: number
+  directReferralTotalCC?: number
+  indirectReferralTotalCC?: number
+  leadershipFromReferralTotalCC?: number
+  compensationStatus?: string
+  overallStatus?: string
+  idempotentReplay?: boolean
+}
+
+const packageFunctions = getFunctions(getApp(), 'asia-southeast1')
+const activatePackageWithWallet = httpsCallable<
+  ActivatePackageRequest,
+  ActivatePackageResponse
+>(packageFunctions, 'activatePackageWithWallet')
+
+const createPackageIdempotencyKey = (
+  uid: string,
+  action: PackageActivationAction,
+  packageId: string,
+): { storageKey: string; idempotencyKey: string } => {
+  const storageKey = `iamchosen:package-activation:${uid}:${action}:${packageId}`
+  const existing = sessionStorage.getItem(storageKey)
+
+  if (existing) {
+    return { storageKey, idempotencyKey: existing }
+  }
+
+  const randomPart =
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`
+
+  const idempotencyKey = `${action.toLowerCase()}:${uid}:${packageId}:${randomPart}`
+  sessionStorage.setItem(storageKey, idempotencyKey)
+
+  return { storageKey, idempotencyKey }
+}
+
+const readCallableErrorCode = (error: unknown): string => {
+  if (!error || typeof error !== 'object' || !('code' in error)) return ''
+  return String((error as { code?: unknown }).code || '').replace(
+    'functions/',
+    '',
+  )
+}
+
+const getPackageActivationErrorMessage = (error: unknown): string => {
+  const code = readCallableErrorCode(error)
+  const fallback =
+    error instanceof Error && error.message
+      ? error.message
+      : 'Package activation could not be completed.'
+
+  switch (code) {
+    case 'unauthenticated':
+      return 'Your session has expired. Please sign in again before upgrading.'
+    case 'permission-denied':
+      return 'The secured package engine rejected this request. Confirm that the activatePackageWithWallet Cloud Function is deployed and that your account is authorized.'
+    case 'failed-precondition':
+      return fallback
+    case 'not-found':
+      return 'The member, wallet, package configuration, or Business Cycle record required by the secured engine was not found.'
+    case 'already-exists':
+      return 'This package request has already been processed. Refresh your dashboard to load the completed result.'
+    case 'resource-exhausted':
+      return 'Your Chosen Wallet does not have enough CC for the full target package price.'
+    case 'unavailable':
+      return 'The secured package engine is temporarily unavailable. Please retry using the same request.'
+    case 'internal':
+      return 'The secured package engine encountered an internal error. No client-side financial write was attempted.'
+    default:
+      return fallback
+  }
+}
 
 interface PackageConfig {
   displayName: string
@@ -137,8 +234,8 @@ const PACKAGE_CONFIGS: Record<string, PackageConfig> = {
     bgClass: 'bg-emerald-400/10',
     glowClass: 'shadow-emerald-400/20',
     gradientClass: 'from-emerald-400 to-green-600',
-    packageValue: 25750,
-    cycleMax: 64375,
+    packageValue: 25000,
+    cycleMax: 62500,
   },
   'Regional Distributor': {
     displayName: 'Regional Distributor',
@@ -147,8 +244,8 @@ const PACKAGE_CONFIGS: Record<string, PackageConfig> = {
     bgClass: 'bg-indigo-400/10',
     glowClass: 'shadow-indigo-400/20',
     gradientClass: 'from-indigo-400 to-blue-600',
-    packageValue: 105000,
-    cycleMax: 262500,
+    packageValue: 100000,
+    cycleMax: 250000,
   },
 }
 
@@ -245,7 +342,6 @@ export default function AffiliateDashboard({
   const { ccSettings } = useCCSettings()
   const [wallet, setWallet] = useState<WalletType | null>(null)
   const [businessCycle, setBusinessCycle] = useState<BusinessCycle | null>(null)
-  const [transactions, setTransactions] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [showCompletedModal, setShowCompletedModal] = useState(false)
 
@@ -264,22 +360,13 @@ export default function AffiliateDashboard({
   const [cashoutError, setCashoutError] = useState<string | null>(null)
   const [cashoutSuccess, setCashoutSuccess] = useState<string | null>(null)
 
-  // Cashin Modal form state
-  const [showCashinModal, setShowCashinModal] = useState(false)
-  const [cashinAmountPhp, setCashinAmountPhp] = useState<number>(3500)
-  const [cashinChannel, setCashinChannel] = useState<'GCash' | 'Maya' | 'Bank'>(
-    'GCash',
-  )
-  const [cashinReference, setCashinReference] = useState('')
-  const [cashinAccountName, setCashinAccountName] = useState('')
-  const [cashinAccountNumber, setCashinAccountNumber] = useState('')
-  const [proofOfPaymentUrl, setProofOfPaymentUrl] = useState('')
-  const [receiptFile, setReceiptFile] = useState<File | null>(null)
-  const [cashinNotes, setCashinNotes] = useState('')
-  const [isDragging, setIsDragging] = useState(false)
-  const [cashinError, setCashinError] = useState<string | null>(null)
-  const [cashinSuccess, setCashinSuccess] = useState<string | null>(null)
+  // Shared My Digital Wallet activity sources
   const [cashinHistory, setCashinHistory] = useState<any[]>([])
+  const [cashoutHistory, setCashoutHistory] = useState<any[]>([])
+  const [orderHistory, setOrderHistory] = useState<any[]>([])
+  const [commissionHistory, setCommissionHistory] = useState<any[]>([])
+  const [p2pReceivedHistory, setP2pReceivedHistory] = useState<any[]>([])
+  const [p2pSentHistory, setP2pSentHistory] = useState<any[]>([])
 
   // Transfer Modal state
   const [showTransferModal, setShowTransferModal] = useState(false)
@@ -295,6 +382,11 @@ export default function AffiliateDashboard({
   const [upgradeError, setUpgradeError] = useState<string | null>(null)
   const [upgradeSuccess, setUpgradeSuccess] = useState<string | null>(null)
   const [upgradeLoading, setUpgradeLoading] = useState(false)
+  const [upgradeResult, setUpgradeResult] =
+    useState<ActivatePackageResponse | null>(null)
+  const [showUpgradeSuccessModal, setShowUpgradeSuccessModal] = useState(false)
+  const [upgradeRedirectSeconds, setUpgradeRedirectSeconds] = useState(4)
+  const [upgradeRedirecting, setUpgradeRedirecting] = useState(false)
 
   // AI Business Coach states
   const [showAICoachModal, setShowAICoachModal] = useState(false)
@@ -324,16 +416,54 @@ export default function AffiliateDashboard({
     'EN',
   )
   const [isWalletExpanded, setIsWalletExpanded] = useState(true)
-
-  // Activity feed filtering
-  const [activityFilter, setActivityFilter] = useState<
-    'ALL' | 'TRANSACTIONS' | 'COMMISSIONS' | 'REFERRALS'
-  >('ALL')
+  const [showMyDigitalWallet, setShowMyDigitalWallet] = useState(false)
 
   // Notifications State linked to Firestore
   const [notifications, setNotifications] = useState<Notification[]>([])
   const [showNotificationsDropdown, setShowNotificationsDropdown] =
     useState(false)
+
+  const returnToMainDashboardAfterUpgrade = useCallback(() => {
+    setUpgradeRedirecting(true)
+    setShowUpgradeSuccessModal(false)
+    setShowUpgradeModal(false)
+    setSelectedUpgradeLevel('')
+    setUpgradeError(null)
+    setUpgradeSuccess(null)
+    setActiveActionModal(null)
+    setShowAICoachModal(false)
+    setShowMyDigitalWallet(false)
+    setActiveMobileTab('home')
+
+    onNavigate('affiliate-dashboard')
+
+    // Switch to the main dashboard route before the full reload. This forces
+    // Auth, profile, package, wallet, Business Cycle, rank, and network data to
+    // be rehydrated from authoritative Firestore state.
+    window.setTimeout(() => {
+      window.location.reload()
+    }, 150)
+  }, [onNavigate])
+
+  useEffect(() => {
+    if (!showUpgradeSuccessModal) return
+
+    setUpgradeRedirectSeconds(4)
+    setUpgradeRedirecting(false)
+
+    const countdownTimer = window.setInterval(() => {
+      setUpgradeRedirectSeconds((current) => Math.max(1, current - 1))
+    }, 1000)
+
+    const redirectTimer = window.setTimeout(() => {
+      returnToMainDashboardAfterUpgrade()
+    }, 4000)
+
+    return () => {
+      window.clearInterval(countdownTimer)
+      window.clearTimeout(redirectTimer)
+    }
+  }, [showUpgradeSuccessModal, returnToMainDashboardAfterUpgrade])
 
   useEffect(() => {
     const unsubscribe = NotificationService.subscribeToNotifications(
@@ -378,6 +508,8 @@ export default function AffiliateDashboard({
         setActiveActionModal(pendingView)
       } else if (pendingView === 'ai-coach') {
         setShowAICoachModal(true)
+      } else if (pendingView === 'cash-in' || pendingView === 'wallet') {
+        setShowMyDigitalWallet(true)
       }
       sessionStorage.removeItem('affiliate_view')
     }
@@ -414,22 +546,6 @@ export default function AffiliateDashboard({
       )
     }
 
-    // 3. Fetch Transactions via WalletService
-    try {
-      const txList = await WalletService.getWalletTransactions(userProfile.uid)
-      txList.sort(
-        (a: any, b: any) =>
-          new Date(b.timestamp || b.createdAt).getTime() -
-          new Date(a.timestamp || a.createdAt).getTime(),
-      )
-      setTransactions(txList)
-    } catch (err) {
-      console.error(
-        'Error loading dashboard details (Step 3: Wallet Transactions):',
-        err,
-      )
-    }
-
     // 4. Fetch Sponsor details if present
     if (userProfile.referredBy) {
       setSponsorLoading(true)
@@ -461,26 +577,126 @@ export default function AffiliateDashboard({
       setSponsor(null)
     }
 
-    // 5. Fetch Cash-In history
+    // 4. Fetch all member-owned activity sources used by RecentActivityCard.
+    // Each query is ownership-scoped; the shared card normalizes, sorts, and paginates.
     try {
       const cashinQuery = query(
         collection(db, 'cashin_requests'),
         where('uid', '==', userProfile.uid),
-        limit(50),
       )
       const cashinSnap = await getDocs(cashinQuery)
-      const cashinList = cashinSnap.docs.map((doc) => doc.data())
-      cashinList.sort(
-        (a, b) =>
-          new Date(b.requestDate || b.requestedAt).getTime() -
-          new Date(a.requestDate || a.requestedAt).getTime(),
+      setCashinHistory(
+        cashinSnap.docs.map((documentSnapshot) => ({
+          id: documentSnapshot.id,
+          ...documentSnapshot.data(),
+        })),
       )
-      setCashinHistory(cashinList)
     } catch (err) {
       console.error(
-        'Error loading dashboard details (Step 5: Cash-in History):',
+        'Error loading dashboard details (Activity: Cash-In history):',
         err,
       )
+      setCashinHistory([])
+    }
+
+    try {
+      const cashoutQuery = query(
+        collection(db, 'cashout_requests'),
+        where('uid', '==', userProfile.uid),
+      )
+      const cashoutSnap = await getDocs(cashoutQuery)
+      setCashoutHistory(
+        cashoutSnap.docs.map((documentSnapshot) => ({
+          id: documentSnapshot.id,
+          ...documentSnapshot.data(),
+        })),
+      )
+    } catch (err) {
+      console.error(
+        'Error loading dashboard details (Activity: Cash-Out history):',
+        err,
+      )
+      setCashoutHistory([])
+    }
+
+    try {
+      const ordersQuery = query(
+        collection(db, 'orders'),
+        where('uid', '==', userProfile.uid),
+      )
+      const ordersSnap = await getDocs(ordersQuery)
+      setOrderHistory(
+        ordersSnap.docs.map((documentSnapshot) => ({
+          id: documentSnapshot.id,
+          ...documentSnapshot.data(),
+        })),
+      )
+    } catch (err) {
+      console.error(
+        'Error loading dashboard details (Activity: Order history):',
+        err,
+      )
+      setOrderHistory([])
+    }
+
+    try {
+      const commissionsQuery = query(
+        collection(db, 'commissions'),
+        where('earnerUid', '==', userProfile.uid),
+      )
+      const commissionsSnap = await getDocs(commissionsQuery)
+      setCommissionHistory(
+        commissionsSnap.docs.map((documentSnapshot) => ({
+          id: documentSnapshot.id,
+          ...documentSnapshot.data(),
+        })),
+      )
+    } catch (err) {
+      console.error(
+        'Error loading dashboard details (Activity: Commission earnings):',
+        err,
+      )
+      setCommissionHistory([])
+    }
+
+    try {
+      const receivedP2PQuery = query(
+        collection(db, 'p2p_transfers'),
+        where('recipientUid', '==', userProfile.uid),
+      )
+      const receivedP2PSnap = await getDocs(receivedP2PQuery)
+      setP2pReceivedHistory(
+        receivedP2PSnap.docs.map((documentSnapshot) => ({
+          id: documentSnapshot.id,
+          ...documentSnapshot.data(),
+        })),
+      )
+    } catch (err) {
+      console.error(
+        'Error loading dashboard details (Activity: Received P2P transfers):',
+        err,
+      )
+      setP2pReceivedHistory([])
+    }
+
+    try {
+      const sentP2PQuery = query(
+        collection(db, 'p2p_transfers'),
+        where('senderUid', '==', userProfile.uid),
+      )
+      const sentP2PSnap = await getDocs(sentP2PQuery)
+      setP2pSentHistory(
+        sentP2PSnap.docs.map((documentSnapshot) => ({
+          id: documentSnapshot.id,
+          ...documentSnapshot.data(),
+        })),
+      )
+    } catch (err) {
+      console.error(
+        'Error loading dashboard details (Activity: Sent P2P transfers):',
+        err,
+      )
+      setP2pSentHistory([])
     }
 
     // 6. Fetch Commissions Summary
@@ -657,77 +873,6 @@ export default function AffiliateDashboard({
     }
   }
 
-  // Submit Cash-In via WalletService
-  const handleCashinSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setCashinError(null)
-    setCashinSuccess(null)
-
-    if (cashinAmountPhp < 70) {
-      setCashinError('Minimum cash-in is ₱70.00 (1 CC).')
-      return
-    }
-
-    if (!cashinReference) {
-      setCashinError('Transaction reference number is required.')
-      return
-    }
-
-    if (!receiptFile) {
-      setCashinError('Please upload a proof of payment receipt.')
-      return
-    }
-
-    setLoading(true)
-    try {
-      const requestId = `CI-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`
-
-      // Upload the receipt to Storage first
-      const uploadResult = await WalletService.uploadReceipt(
-        userProfile.uid,
-        requestId,
-        receiptFile,
-      )
-
-      const computedCC = WalletService.calculateCashInCC(cashinAmountPhp)
-      await WalletService.createCashInRequest(userProfile.uid, {
-        requestId,
-        memberId: userProfile.memberId,
-        fullName: userProfile.fullName,
-        email: userProfile.email,
-        amountPHP: cashinAmountPhp,
-        computedCC,
-        paymentMethod: cashinChannel,
-        referenceNumber: cashinReference,
-
-        // Storage receipt details
-        proofOfPaymentUrl: uploadResult.proofOfPaymentUrl,
-        proofOfPaymentPath: uploadResult.proofOfPaymentPath,
-        proofOfPaymentFileName: uploadResult.proofOfPaymentFileName,
-        proofOfPaymentContentType: uploadResult.proofOfPaymentContentType,
-        proofOfPaymentSizeBytes: uploadResult.proofOfPaymentSizeBytes,
-
-        notes: cashinNotes,
-      })
-
-      setCashinSuccess(
-        `Cash-In request for ₱${cashinAmountPhp.toLocaleString()} submitted successfully! We are validating your receipt.`,
-      )
-      setCashinReference('')
-      setReceiptFile(null)
-      setTimeout(() => {
-        setShowCashinModal(false)
-        setProofOfPaymentUrl('')
-        setCashinNotes('')
-        fetchDashboardData()
-      }, 3000)
-    } catch (err: any) {
-      setCashinError(err.message || 'Failed to submit request.')
-    } finally {
-      setLoading(false)
-    }
-  }
-
   // Submit P2P Transfer via WalletService
   const handleTransferSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -775,11 +920,13 @@ export default function AffiliateDashboard({
     }
   }
 
-  // Submit Package Upgrade via PackageService
+  // Submit Package Upgrade through the secured callable package engine.
+  // The browser performs validation for user feedback only; the backend remains authoritative.
   const handleUpgradeSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setUpgradeError(null)
     setUpgradeSuccess(null)
+    setUpgradeResult(null)
 
     if (!selectedUpgradeLevel) {
       setUpgradeError('Please select a target package level to upgrade to.')
@@ -792,8 +939,8 @@ export default function AffiliateDashboard({
       Gold: 1500,
       Platinum: 3000,
       Diamond: 5000,
-      'City Distributor': 25750,
-      'Regional Distributor': 105000,
+      'City Distributor': 25000,
+      'Regional Distributor': 100000,
     }
 
     const currentLevel = userProfile.packageLevel || 'Bronze'
@@ -807,35 +954,60 @@ export default function AffiliateDashboard({
       return
     }
 
-    const costCC = targetValue - currentValue
-
-    if (!wallet || wallet.chosenWalletBalance < costCC) {
+    if (!wallet || wallet.chosenWalletBalance < targetValue) {
       setUpgradeError(
-        `Insufficient Chosen Wallet balance. You need ${costCC} CC to upgrade to ${selectedUpgradeLevel}, but your Chosen Wallet balance is only ${wallet?.chosenWalletBalance || 0} CC.`,
+        `Insufficient Chosen Wallet balance. The full ${selectedUpgradeLevel} package price is ${targetValue} CC, but your Chosen Wallet balance is only ${wallet?.chosenWalletBalance || 0} CC.`,
       )
       return
     }
 
+    const activationAction: PackageActivationAction = 'PACKAGE_UPGRADE'
+    const { storageKey, idempotencyKey } = createPackageIdempotencyKey(
+      userProfile.uid,
+      activationAction,
+      selectedUpgradeLevel,
+    )
+
     setUpgradeLoading(true)
+
     try {
-      await PackageService.upgradePackage(
-        userProfile.uid,
-        userProfile.email,
-        currentLevel,
-        selectedUpgradeLevel as any,
-        costCC,
+      const callableResult = await activatePackageWithWallet({
+        packageId: selectedUpgradeLevel,
+        accountPath: 'Affiliate',
+        activationAction,
+        idempotencyKey,
+      })
+      const result = callableResult.data
+
+      if (result.success === false) {
+        throw new Error(
+          result.message ||
+            'The secured package engine did not complete the upgrade.',
+        )
+      }
+
+      sessionStorage.removeItem(storageKey)
+      setUpgradeResult(result)
+      setUpgradeSuccess(
+        `Your ${result.packageLevel || selectedUpgradeLevel} Affiliate package upgrade was completed securely.`,
       )
 
-      setUpgradeSuccess(
-        `Congratulations! Successfully upgraded your package level to ${selectedUpgradeLevel}!`,
+      window.dispatchEvent(
+        new CustomEvent('package_activation_completed', {
+          detail: result,
+        }),
       )
-      setTimeout(() => {
-        setShowUpgradeModal(false)
-        setSelectedUpgradeLevel('')
-        fetchDashboardData()
-      }, 3000)
-    } catch (err: any) {
-      setUpgradeError(err.message || 'Failed to complete package upgrade.')
+
+      // Refresh local dashboard state before displaying the receipt. The
+      // success modal then returns to the main dashboard and performs a full
+      // reload so the parent profile is also refreshed.
+      await fetchDashboardData()
+      setShowUpgradeModal(false)
+      setShowUpgradeSuccessModal(true)
+    } catch (error: unknown) {
+      console.error('Secured package upgrade failed:', error)
+      // Keep the idempotency key in sessionStorage so a retry cannot double-charge.
+      setUpgradeError(getPackageActivationErrorMessage(error))
     } finally {
       setUpgradeLoading(false)
     }
@@ -871,46 +1043,6 @@ export default function AffiliateDashboard({
     }
   }
 
-  // File drop helpers
-  const handleFileDrop = (e: React.DragEvent) => {
-    e.preventDefault()
-    setIsDragging(false)
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      handleFile(e.dataTransfer.files[0])
-    }
-  }
-
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      handleFile(e.target.files[0])
-    }
-  }
-
-  const handleFile = (file: File) => {
-    if (!file.type.startsWith('image/') && file.type !== 'application/pdf') {
-      setCashinError(
-        'Invalid file type. Please upload an image or PDF proof of payment receipt.',
-      )
-      return
-    }
-
-    if (file.size > 5 * 1024 * 1024) {
-      setCashinError(
-        'File is too large. Please upload an image smaller than 5MB.',
-      )
-      return
-    }
-
-    setReceiptFile(file)
-    try {
-      const previewUrl = URL.createObjectURL(file)
-      setProofOfPaymentUrl(previewUrl)
-      setCashinError(null)
-    } catch (e) {
-      setCashinError('Failed to generate file preview.')
-    }
-  }
-
   const currentDayName = () => {
     return new Date().toLocaleDateString('en-US', { weekday: 'long' })
   }
@@ -924,12 +1056,19 @@ export default function AffiliateDashboard({
     return d
   }
 
+  const handleOpenMyDigitalWallet = (): void => {
+    setShowMyDigitalWallet(true)
+    setActiveActionModal(null)
+    setShowAICoachModal(false)
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
   const handleMobileTabChange = (tab: CustomerTabType) => {
     setActiveMobileTab(tab)
     if (tab === 'register') {
       onNavigate('member-registration')
     } else if (tab === 'wallet') {
-      onNavigate('cash-in')
+      handleOpenMyDigitalWallet()
     }
   }
 
@@ -970,43 +1109,16 @@ export default function AffiliateDashboard({
     }
   }
 
-  // Filtered recent activities
-  const getFilteredActivities = () => {
-    let list = []
-
-    // Form comprehensive log from real Firestore ledger & commissions
-    const txMapped = transactions.map((tx) => ({
-      id: tx.id,
-      title: tx.description || 'Wallet Transaction',
-      type: 'TRANSACTIONS',
-      amount: `${tx.type === 'CREDIT' ? '+' : '-'}${tx.amount || tx.amountCC} CC`,
-      isCredit: tx.type === 'CREDIT',
-      date: new Date(tx.timestamp || tx.createdAt).toLocaleString(),
-      subtext: `ID: ${tx.id} • Wallet: ${tx.walletType || 'Chosen'}`,
-    }))
-
-    list = [...txMapped]
-
-    if (commissionSummary && commissionSummary.count > 0) {
-      // Add fake or real commissions if they aren't duplicate
-    }
-
-    if (activityFilter === 'ALL') return list
-    return list.filter((item) => item.type === activityFilter)
-  }
-
-  const filteredActivities = getFilteredActivities()
-
   const simulatorTiers = [
     { name: 'Bronze', fallbackCC: 50, isDistributor: false },
     { name: 'Silver', fallbackCC: 350, isDistributor: false },
     { name: 'Gold', fallbackCC: 1500, isDistributor: false },
     { name: 'Platinum', fallbackCC: 3000, isDistributor: false },
     { name: 'Diamond', fallbackCC: 5000, isDistributor: false },
-    { name: 'City Distributor', fallbackCC: undefined, isDistributor: true },
+    { name: 'City Distributor', fallbackCC: 25000, isDistributor: true },
     {
       name: 'Regional Distributor',
-      fallbackCC: undefined,
+      fallbackCC: 100000,
       isDistributor: true,
     },
   ]
@@ -1080,8 +1192,8 @@ export default function AffiliateDashboard({
       Gold: 1500,
       Platinum: 3000,
       Diamond: 5000,
-      'City Distributor': 25750,
-      'Regional Distributor': 105000,
+      'City Distributor': 25000,
+      'Regional Distributor': 100000,
     }
     const foundPkg = dbPackages.find((p) => p.id === level || p.name === level)
     if (foundPkg && typeof foundPkg.valueCC === 'number') {
@@ -1170,163 +1282,109 @@ export default function AffiliateDashboard({
       ? rawMonthlyEarnings
       : 0
 
+  const renderBusinessCycleProgress = () => {
+    return (
+      <div className='bg-zinc-950 border border-cyan-800/80 rounded-3xl p-6 shadow-xl relative overflow-hidden group'>
+        <div className='flex justify-between items-start mb-5'>
+          <div>
+            <h3 className='font-extrabold text-sm text-white uppercase tracking-tight flex items-center gap-2'>
+              <ShieldCheck className='w-4 h-4 text-cyan-500 animate-pulse' />{' '}
+              Business Cycle Progress
+            </h3>
+          </div>
+          {businessCycle && cycleStatus && (
+            <div className='flex flex-wrap justify-end gap-2'>
+              <span
+                className={`text-[9px] font-mono px-2.5 py-1 rounded-full uppercase font-bold border ${
+                  accountStatus === 'Active'
+                    ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/15'
+                    : 'bg-amber-500/10 text-amber-400 border-amber-500/15'
+                }`}
+              >
+                Account: {accountStatus}
+              </span>
+              <span
+                className={`text-[9px] font-mono px-2.5 py-1 rounded-full uppercase font-bold border ${
+                  cycleStatus === 'Active'
+                    ? 'bg-cyan-500/10 text-cyan-400 border-cyan-500/15'
+                    : 'bg-red-500/10 text-red-400 border-red-500/15'
+                }`}
+              >
+                Cycle: {cycleStatus}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {businessCycle ? (
+          <div className='space-y-5'>
+            <div className='space-y-2'>
+              <div className='flex justify-between text-xs font-mono'>
+                <span className='text-zinc-400 font-semibold'>
+                  Qualified Earnings Balance:
+                </span>
+                <span className='text-zinc-200 font-bold'>
+                  {businessCycle.currentQualifiedEarningsCC} /{' '}
+                  {businessCycle.earningsCapCC} CC
+                </span>
+              </div>
+              <div className='w-full bg-zinc-900 h-5 rounded-full overflow-hidden border border-zinc-800'>
+                <div
+                  className='cyan-gradient h-full transition-all duration-500'
+                  style={{
+                    width: `${Math.min(
+                      100,
+                      (businessCycle.currentQualifiedEarningsCC /
+                        businessCycle.earningsCapCC) *
+                        100,
+                    )}%`,
+                  }}
+                />
+              </div>
+              <div className='flex items-center justify-center text-[10px] text-zinc-500 uppercase font-mono'>
+                <span className='text-cyan-500 font-bold'>
+                  {Math.max(
+                    Number(businessCycle.earningsCapCC || 0) -
+                      Number(businessCycle.currentQualifiedEarningsCC || 0),
+                    0,
+                  )}{' '}
+                  CC capacity remaining
+                </span>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className='text-center py-8'>
+            <Award className='w-8 h-8 text-zinc-500 mx-auto mb-3' />
+            <h4 className='font-extrabold text-white text-sm uppercase tracking-tight'>
+              Business Cycle not initialized
+            </h4>
+            <p className='text-zinc-500 text-xs mt-2 max-w-sm mx-auto'>
+              You do not have an active package tier cycle on file. Please
+              purchase a Bronze, Silver, Gold, Platinum, or Diamond package to
+              initialize your earnings ledger.
+            </p>
+          </div>
+        )}
+      </div>
+    )
+  }
+
   const renderRecentActivities = () => {
     return (
-      <div className='space-y-6'>
-        {/* Active Business Plan Cycle Card */}
-        <div className='bg-zinc-950 border border-cyan-800/80 rounded-3xl p-6 shadow-xl relative overflow-hidden group'>
-          <div className='flex justify-between items-start mb-5'>
-            <div>
-              <h3 className='font-extrabold text-sm text-white uppercase tracking-tight flex items-center gap-2'>
-                <ShieldCheck className='w-4 h-4 text-cyan-500 animate-pulse' />{' '}
-                Business Cycle Progress
-              </h3>
-            </div>
-            {businessCycle && cycleStatus && (
-              <div className='flex flex-wrap justify-end gap-2'>
-                <span
-                  className={`text-[9px] font-mono px-2.5 py-1 rounded-full uppercase font-bold border ${
-                    accountStatus === 'Active'
-                      ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/15'
-                      : 'bg-amber-500/10 text-amber-400 border-amber-500/15'
-                  }`}
-                >
-                  Account: {accountStatus}
-                </span>
-                <span
-                  className={`text-[9px] font-mono px-2.5 py-1 rounded-full uppercase font-bold border ${
-                    cycleStatus === 'Active'
-                      ? 'bg-cyan-500/10 text-cyan-400 border-cyan-500/15'
-                      : 'bg-red-500/10 text-red-400 border-red-500/15'
-                  }`}
-                >
-                  Cycle: {cycleStatus}
-                </span>
-              </div>
-            )}
-          </div>
-
-          {businessCycle ? (
-            <div className='space-y-5'>
-              {/* Progress Indicators */}
-              <div className='space-y-2'>
-                <div className='flex justify-between text-xs font-mono'>
-                  <span className='text-zinc-400 font-semibold'>
-                    Qualified Earnings Balance:
-                  </span>
-                  <span className='text-zinc-200 font-bold'>
-                    {businessCycle.currentQualifiedEarningsCC} /{' '}
-                    {businessCycle.earningsCapCC} CC
-                  </span>
-                </div>
-                <div className='w-full bg-zinc-900 h-5 rounded-full overflow-hidden border border-zinc-800'>
-                  <div
-                    className='cyan-gradient h-full transition-all duration-500'
-                    style={{
-                      width: `${Math.min(100, (businessCycle.currentQualifiedEarningsCC / businessCycle.earningsCapCC) * 100)}%`,
-                    }}
-                  />
-                </div>
-                <div className='flex items-center justify-center  text-[10px] text-zinc-500 uppercase font-mono'>
-                  <span className='text-cyan-500 font-bold'>
-                    {Math.max(
-                      Number(businessCycle.earningsCapCC || 0) -
-                        Number(businessCycle.currentQualifiedEarningsCC || 0),
-                      0,
-                    )}{' '}
-                    CC capacity remaining
-                  </span>
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className='text-center py-8'>
-              <Award className='w-8 h-8 text-zinc-500 mx-auto mb-3' />
-              <h4 className='font-extrabold text-white text-sm uppercase tracking-tight'>
-                Business Cycle not initialized
-              </h4>
-              <p className='text-zinc-500 text-xs mt-2 max-w-sm mx-auto'>
-                You do not have an active package tier cycle on file. Please
-                purchase a Bronze, Silver, Gold, Platinum, or Diamond package to
-                initialize your earnings ledger.
-              </p>
-            </div>
-          )}
-        </div>
-
-        {/* Recent Account Activities Card */}
-        <div className='bg-zinc-950 border border-zinc-800/80 rounded-3xl p-6 shadow-xl relative overflow-hidden'>
-          <div className='absolute top-0 inset-x-0 h-[2px] bg-zinc-800' />
-
-          <div className='flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 mb-5'>
-            <div>
-              <h3 className='font-extrabold text-sm text-white uppercase tracking-tight'>
-                Recent Account Activities
-              </h3>
-              <p className='text-[10px] text-zinc-500 uppercase tracking-widest font-mono mt-1'>
-                Audit Ledger & Network Milestones
-              </p>
-            </div>
-
-            {/* Filter buttons inside card */}
-            <div className='flex gap-1.5 bg-zinc-900/60 p-1 rounded-xl border border-zinc-850'>
-              <button
-                onClick={() => setActivityFilter('ALL')}
-                className={`text-[9px] font-bold uppercase px-2.5 py-1 rounded-lg transition-colors cursor-pointer ${
-                  activityFilter === 'ALL'
-                    ? 'bg-zinc-850 text-white border border-zinc-800'
-                    : 'bg-transparent text-zinc-500 hover:text-zinc-300'
-                }`}
-              >
-                All Activities
-              </button>
-              <button
-                onClick={() => setActivityFilter('TRANSACTIONS')}
-                className={`text-[9px] font-bold uppercase px-2.5 py-1 rounded-lg transition-colors cursor-pointer ${
-                  activityFilter === 'TRANSACTIONS'
-                    ? 'bg-zinc-850 text-white border border-zinc-800'
-                    : 'bg-transparent text-zinc-500 hover:text-zinc-300'
-                }`}
-              >
-                Financial Ledger
-              </button>
-            </div>
-          </div>
-
-          {filteredActivities.length === 0 ? (
-            <div className='text-center py-8 text-zinc-500 text-xs font-light'>
-              No account activities matched your filter.
-            </div>
-          ) : (
-            <div className='space-y-2.5 max-h-[350px] overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-zinc-800 scrollbar-track-transparent'>
-              {filteredActivities.map((item, i) => (
-                <div
-                  key={item.id || i}
-                  className='bg-zinc-900/30 hover:bg-zinc-900/55 border border-zinc-850 p-3.5 rounded-2xl flex justify-between items-center text-xs transition-colors'
-                >
-                  <div>
-                    <div className='flex items-center gap-1.5 flex-wrap'>
-                      <span className='font-bold text-white text-[11px] leading-tight'>
-                        {item.title}
-                      </span>
-                    </div>
-                    <span className='block text-[8px] text-zinc-500 font-mono mt-1 uppercase tracking-wider'>
-                      {item.date} • {item.subtext}
-                    </span>
-                  </div>
-                  <span
-                    className={`font-mono font-black text-xs ml-2 shrink-0 ${
-                      item.isCredit ? 'text-emerald-400' : 'text-zinc-300'
-                    }`}
-                  >
-                    {item.amount}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
+      <RecentActivityCard
+        cashins={cashinHistory}
+        cashouts={cashoutHistory}
+        orders={orderHistory}
+        commissions={commissionHistory}
+        p2pReceived={p2pReceivedHistory}
+        p2pSent={p2pSentHistory}
+        currentUid={userProfile.uid}
+        accountType='Affiliate'
+        layoutVariant='wide'
+        pageSize={6}
+        visibleTabs={['earnings', 'deposits', 'withdrawals', 'orders']}
+      />
     )
   }
 
@@ -1517,289 +1575,318 @@ export default function AffiliateDashboard({
 
         {/* Main Workspace Frame */}
         <main className='max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 pt-6 pb-[100px] lg:pb-10 space-y-6'>
-          {businessCycle && isBusinessCycleCompleted && (
-            <div className='bg-red-500/10 border border-red-500/20 text-red-400 p-6 rounded-3xl flex flex-col md:flex-row justify-between items-start md:items-center gap-6 relative overflow-hidden'>
-              <div className='absolute top-0 inset-y-0 left-0 w-1 bg-red-500' />
-              <div>
-                <h3 className='font-extrabold text-sm uppercase tracking-wider text-red-400 flex items-center gap-2'>
-                  <ShieldAlert className='w-4 h-4 animate-pulse text-red-500' />{' '}
-                  Business Cycle Completed
-                </h3>
-                <p className='text-xs text-zinc-300 mt-1 max-w-2xl leading-relaxed'>
-                  Your member account remains {accountStatus}. Your current
-                  Business Cycle reached its earnings cap, so commission
-                  eligibility is paused until reactivation or upgrade.
-                </p>
-              </div>
-              <div className='flex gap-2.5 shrink-0 w-full md:w-auto mt-2 md:mt-0'>
-                <button
-                  onClick={() => {
-                    window.history.pushState(
-                      {},
-                      '',
-                      '/package-selection?type=affiliate-business&action=reactivate',
-                    )
-                    onNavigate('package-selection')
-                  }}
-                  className='flex-1 md:flex-none px-4 py-2 bg-zinc-900 hover:bg-zinc-850 text-white font-bold text-xs uppercase tracking-wider rounded-xl border border-zinc-800 cursor-pointer transition-colors'
-                >
-                  Reactivate Business Cycle
-                </button>
-                <button
-                  onClick={() => {
-                    window.history.pushState(
-                      {},
-                      '',
-                      '/package-selection?type=affiliate-business&action=upgrade',
-                    )
-                    onNavigate('package-selection')
-                  }}
-                  className='flex-1 md:flex-none px-4 py-2 bg-cyan-500 hover:bg-cyan-400 text-black font-extrabold text-xs uppercase tracking-wider rounded-xl cursor-pointer transition-colors'
-                >
-                  Upgrade Package
-                </button>
-              </div>
-            </div>
-          )}
-          {/* Reusable Chosen Wallet Card - Placed above the welcome banner */}
-          <ChosenWalletCard
-            uid={userProfile.uid}
-            accountType={
-              userProfile.accountType as
-                | 'Customer'
-                | 'Smart Customer'
-                | 'Affiliate'
-            }
-            packageLevel={userProfile.packageLevel || 'None'}
-            balanceCC={wallet?.chosenWalletBalance || 0}
-            displayReferenceRatePHP={ccSettings.displayReferenceRatePHP || 70}
-            isLoading={loading}
-            onCashIn={() => onNavigate('cash-in')}
-            onUpgrade={() => setShowUpgradeModal(true)}
-            onTransfer={() => onNavigate('p2p-transfer')}
-            canUpgrade={userProfile.packageLevel !== 'Regional Distributor'}
-            canTransfer={true}
-          />
-
-          {/* Wallet Overview (Collapsible Card) */}
-          <div className='bg-[#111318] border border-cyan-800/80 rounded-3xl shadow-xl overflow-hidden'>
-            {/* Header Bar */}
-            <div
-              onClick={() => setIsWalletExpanded((prev) => !prev)}
-              className='p-6 flex flex-col sm:flex-row justify-between items-start sm:items-center cursor-pointer select-none bg-[#171A22] border-b border-cyan-500/40 hover:bg-zinc-900/30 transition-colors gap-4 sm:gap-0'
-            >
-              <div className='flex items-center gap-3'>
-                <div className='w-9 h-9 bg-cyan-500/10 border border-cyan-500/25 text-cyan-400 rounded-xl flex items-center justify-center'>
-                  <WalletIcon className='w-4 h-4' />
-                </div>
-                <div>
-                  <h3 className='font-extrabold text-sm text-white uppercase tracking-tight flex items-center gap-2'>
-                    Wallet Portfolio Overview
-                  </h3>
-                  <p className='text-[10px] text-zinc-500 uppercase tracking-widest font-mono mt-0.5'>
-                    Chosen Credits • Earnings Balance
-                  </p>
-                </div>
-              </div>
-
-              <div className='flex items-center gap-4 w-full sm:w-auto justify-between sm:justify-end'>
-                <div className='flex items-center gap-4 text-sm sm:text-xs font-mono pr-2'>
+          {showMyDigitalWallet ? (
+            <MyDigitalWallet
+              userProfile={userProfile}
+              wallet={wallet}
+              cashinHistory={cashinHistory}
+              cashoutHistory={cashoutHistory}
+              orders={orderHistory}
+              commissionHistory={commissionHistory}
+              p2pReceivedHistory={p2pReceivedHistory}
+              p2pSentHistory={p2pSentHistory}
+              isLoading={loading}
+              onRefresh={fetchDashboardData}
+              onBack={() => setShowMyDigitalWallet(false)}
+            />
+          ) : (
+            <>
+              {businessCycle && isBusinessCycleCompleted && (
+                <div className='bg-red-500/10 border border-red-500/20 text-red-400 p-6 rounded-3xl flex flex-col md:flex-row justify-between items-start md:items-center gap-6 relative overflow-hidden'>
+                  <div className='absolute top-0 inset-y-0 left-0 w-1 bg-red-500' />
                   <div>
-                    <span className='text-zinc-400 uppercase text-[10px] sm:text-[8px] block font-bold'>
-                      Chosen Balance
-                    </span>
-                    <span className='text-white font-black text-base sm:text-sm'>
-                      {wallet ? wallet.chosenWalletBalance.toFixed(2) : '0.00'}{' '}
-                      CC
-                    </span>
+                    <h3 className='font-extrabold text-sm uppercase tracking-wider text-red-400 flex items-center gap-2'>
+                      <ShieldAlert className='w-4 h-4 animate-pulse text-red-500' />{' '}
+                      Business Cycle Completed
+                    </h3>
+                    <p className='text-xs text-zinc-300 mt-1 max-w-2xl leading-relaxed'>
+                      Your member account remains {accountStatus}. Your current
+                      Business Cycle reached its earnings cap, so commission
+                      eligibility is paused until reactivation or upgrade.
+                    </p>
                   </div>
-                  <div className='w-px h-8 sm:h-6 bg-zinc-800' />
-                  <div>
-                    <span className='text-zinc-400 uppercase text-[10px] sm:text-[8px] block font-bold'>
-                      Balance Commissions
-                    </span>
-                    <span className='text-amber-500 font-black text-base sm:text-sm'>
-                      {wallet
-                        ? wallet.commissionWalletBalance.toFixed(2)
-                        : '0.00'}{' '}
-                      CC
-                    </span>
-                  </div>
-                </div>
-
-                <div className='w-7 h-7 bg-zinc-900 border border-zinc-800 rounded-lg flex items-center justify-center text-zinc-400 shrink-0'>
-                  {isWalletExpanded ? (
-                    <ChevronUp className='w-4 h-4' />
-                  ) : (
-                    <ChevronDown className='w-4 h-4' />
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {/* Collapsible content */}
-            {isWalletExpanded && (
-              <div className='p-6 bg-[#111318] animate-fadeIn space-y-6'>
-                {/* Rest of Portfolio Grid (4 items: Commission, Marketing Support, Reward, and Cash Wallet) */}
-                <div className='grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4'>
-                  {/* Commission Wallet */}
-                  <div className='bg-zinc-950 border border-cyan-800/80 rounded-2xl p-4 shadow-md relative overflow-hidden group'>
-                    <div className='flex justify-between items-start mb-2'>
-                      <span className='text-[11px] text-zinc-500 uppercase tracking-widest font-mono'>
-                        Total Earnings
-                      </span>
-                      <div className='w-8 h-8 bg-amber-500/10 rounded-md flex items-center justify-center border border-amber-500/25 text-amber-500'>
-                        <DollarSign className='w-5 h-5' />
-                      </div>
-                    </div>
-                    <div className='text-base font-black tracking-tight text-white mb-0.5'>
-                      {wallet
-                        ? wallet.commissionWalletBalance.toFixed(2)
-                        : '0.00'}{' '}
-                      CC
-                    </div>
-                    <div className='text-[11px] text-zinc-400 font-mono'>
-                      ≈ ₱
-                      {wallet
-                        ? (
-                            wallet.commissionWalletBalance *
-                            ccSettings.cashOutRatePHP
-                          ).toLocaleString()
-                        : '0'}
-                    </div>
-                  </div>
-
-                  {/* Marketing Support Wallet */}
-                  <div className='bg-zinc-950 border border-cyan-800/80 rounded-2xl p-4 shadow-md relative overflow-hidden'>
-                    <div className='flex justify-between items-start mb-2'>
-                      <span className='text-[11px] text-zinc-500 uppercase tracking-widest font-mono'>
-                        MSA
-                      </span>
-                      <div className='w-8 h-8 bg-blue-500/10 rounded-md flex items-center justify-center border border-blue-500/25 text-blue-400'>
-                        <ChartNoAxesCombined className='w-5 h-5' />
-                      </div>
-                    </div>
-                    <div className='text-base font-black tracking-tight text-white mb-0.5'>
-                      {wallet
-                        ? wallet.marketingSupportWalletBalance.toFixed(2)
-                        : '0.00'}{' '}
-                      CC
-                    </div>
-                    <div className='text-[11px] text-zinc-400 font-mono'>
-                      ≈ ₱
-                      {wallet
-                        ? (
-                            wallet.marketingSupportWalletBalance * 70
-                          ).toLocaleString()
-                        : '0'}
-                    </div>
-                    <div className='mt-3 h-6 flex items-center justify-center text-[8px] text-zinc-500 uppercase tracking-wider border border-zinc-900 bg-zinc-950 rounded-lg'>
-                      Locked Balance
-                    </div>
-                  </div>
-
-                  {/* Reward Wallet */}
-                  <div className='bg-zinc-950 border border-cyan-800/80 rounded-2xl p-4 shadow-md relative overflow-hidden'>
-                    <div className='flex justify-between items-start mb-2'>
-                      <span className='text-[9px] text-zinc-500 uppercase tracking-widest font-mono'>
-                        Today's Earnings
-                      </span>
-                      <div className='w-8 h-8 bg-emerald-500/10 rounded-md flex items-center justify-center border border-emerald-500/25 text-emerald-400'>
-                        <ChartCandlestick className='w-5 h-5' />
-                      </div>
-                    </div>
-                    <div className='text-base font-black tracking-tight text-white mb-0.5'>
-                      {wallet ? wallet.rewardWalletBalance.toFixed(2) : '0.00'}{' '}
-                      CC
-                    </div>
-                    <div className='text-[9px] text-zinc-400 font-mono'>
-                      ≈ ₱
-                      {wallet
-                        ? (wallet.rewardWalletBalance * 70).toLocaleString()
-                        : '0'}
-                    </div>
-                    <div className='mt-3 h-6 flex items-center justify-center text-[8px] text-zinc-500 uppercase tracking-wider border border-zinc-900 bg-zinc-950 rounded-lg'>
-                      Non-Withdrawable
-                    </div>
-                  </div>
-
-                  {/* Cash Wallet */}
-                  <div className='bg-zinc-950 border border-cyan-800/80 rounded-2xl p-4 shadow-md relative overflow-hidden'>
-                    <div className='flex justify-between items-start mb-2'>
-                      <span className='text-[9px] text-zinc-500 uppercase tracking-widest font-mono'>
-                        Withdrawable Balance
-                      </span>
-                      <div className='w-8 h-8 bg-teal-500/10 rounded-md flex items-center justify-center border border-teal-500/25 text-teal-400'>
-                        <BanknoteArrowDown className='w-5 h-5' />
-                      </div>
-                    </div>
-                    <div className='text-base font-black tracking-tight text-white mb-0.5'>
-                      {wallet ? wallet.rewardWalletBalance.toFixed(2) : '0.00'}{' '}
-                      CC
-                    </div>
-                    <div className='text-[9px] text-zinc-400 font-mono'>
-                      ≈ ₱
-                      {wallet
-                        ? (wallet.rewardWalletBalance * 70).toLocaleString()
-                        : '0'}
-                    </div>
+                  <div className='flex gap-2.5 shrink-0 w-full md:w-auto mt-2 md:mt-0'>
                     <button
-                      onClick={() => setShowCashoutModal(true)}
-                      className='mt-3 w-full bg-zinc-900 hover:bg-zinc-850 border border-zinc-800 hover:border-teal-500/40 text-white hover:text-teal-400 font-bold text-[9px] py-1.5 rounded-lg transition-all cursor-pointer flex items-center justify-center gap-1'
+                      onClick={() => {
+                        window.history.pushState(
+                          {},
+                          '',
+                          '/package-selection?type=affiliate-business&action=reactivate',
+                        )
+                        onNavigate('package-selection')
+                      }}
+                      className='flex-1 md:flex-none px-4 py-2 bg-zinc-900 hover:bg-zinc-850 text-white font-bold text-xs uppercase tracking-wider rounded-xl border border-zinc-800 cursor-pointer transition-colors'
                     >
-                      <ArrowUpRight className='w-3.5 h-3.5' /> Request Cash-Out
+                      Reactivate Business Cycle
+                    </button>
+                    <button
+                      onClick={() => {
+                        window.history.pushState(
+                          {},
+                          '',
+                          '/package-selection?type=affiliate-business&action=upgrade',
+                        )
+                        onNavigate('package-selection')
+                      }}
+                      className='flex-1 md:flex-none px-4 py-2 bg-cyan-500 hover:bg-cyan-400 text-black font-extrabold text-xs uppercase tracking-wider rounded-xl cursor-pointer transition-colors'
+                    >
+                      Upgrade Package
                     </button>
                   </div>
                 </div>
-              </div>
-            )}
-          </div>
-
-          {/* Shared Role-Aware Performance Cards System */}
-          {!(
-            userProfile?.accountType === 'Customer' &&
-            userProfile?.packageLevel === 'None'
-          ) && (
-            <div className='my-6'>
-              <DashboardPerformanceCards
-                userProfile={userProfile}
-                onNavigate={onNavigate}
-                activeActionModal={activeActionModal}
-                setActiveActionModal={setActiveActionModal}
-                renderRecentActivities={renderRecentActivities}
+              )}
+              {/* Reusable Chosen Wallet Card - Placed above the welcome banner */}
+              <ChosenWalletCard
+                uid={userProfile.uid}
+                accountType={
+                  userProfile.accountType as
+                    | 'Customer'
+                    | 'Smart Customer'
+                    | 'Affiliate'
+                }
+                packageLevel={userProfile.packageLevel || 'None'}
+                balanceCC={wallet?.chosenWalletBalance || 0}
+                displayReferenceRatePHP={
+                  ccSettings.displayReferenceRatePHP || 70
+                }
+                isLoading={loading}
+                onCashIn={handleOpenMyDigitalWallet}
+                onUpgrade={() => setShowUpgradeModal(true)}
+                onTransfer={() => onNavigate('p2p-transfer')}
+                canUpgrade={userProfile.packageLevel !== 'Regional Distributor'}
+                canTransfer={true}
               />
-            </div>
-          )}
 
-          {/* AI Coach Advice Banner */}
-          <div className='bg-zinc-950 border border-cyan-800/80 rounded-3xl p-6 shadow-xl relative overflow-hidden group'>
-            <div className='absolute top-0 right-0 w-32 h-32 bg-teal-500/5 rounded-full blur-3xl pointer-events-none' />
-            <div className='flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4'>
-              <div className='flex items-start gap-3'>
-                <div className='w-9 h-9 bg-teal-500/10 border border-teal-500/25 text-teal-400 rounded-xl flex items-center justify-center shrink-0 group-hover:scale-110 transition-transform'>
-                  <MessageSquare className='w-4 h-4' />
+              {/* Wallet Overview (Collapsible Card) */}
+              <div className='bg-[#111318] border border-cyan-800/80 rounded-3xl shadow-xl overflow-hidden'>
+                {/* Header Bar */}
+                <div
+                  onClick={() => setIsWalletExpanded((prev) => !prev)}
+                  className='p-6 flex flex-col sm:flex-row justify-between items-start sm:items-center cursor-pointer select-none bg-[#171A22] border-b border-cyan-500/40 hover:bg-zinc-900/30 transition-colors gap-4 sm:gap-0'
+                >
+                  <div className='flex items-center gap-3'>
+                    <div className='w-9 h-9 bg-cyan-500/10 border border-cyan-500/25 text-cyan-400 rounded-xl flex items-center justify-center'>
+                      <WalletIcon className='w-4 h-4' />
+                    </div>
+                    <div>
+                      <h3 className='font-extrabold text-sm text-white uppercase tracking-tight flex items-center gap-2'>
+                        Wallet Portfolio Overview
+                      </h3>
+                      <p className='text-[10px] text-zinc-500 uppercase tracking-widest font-mono mt-0.5'>
+                        Chosen Credits • Earnings Balance
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className='flex items-center gap-4 w-full sm:w-auto justify-between sm:justify-end'>
+                    <div className='flex items-center gap-4 text-sm sm:text-xs font-mono pr-2'>
+                      <div>
+                        <span className='text-zinc-400 uppercase text-[10px] sm:text-[8px] block font-bold'>
+                          Chosen Balance
+                        </span>
+                        <span className='text-white font-black text-base sm:text-sm'>
+                          {wallet
+                            ? wallet.chosenWalletBalance.toFixed(2)
+                            : '0.00'}{' '}
+                          CC
+                        </span>
+                      </div>
+                      <div className='w-px h-8 sm:h-6 bg-zinc-800' />
+                      <div>
+                        <span className='text-zinc-400 uppercase text-[10px] sm:text-[8px] block font-bold'>
+                          Balance Commissions
+                        </span>
+                        <span className='text-amber-500 font-black text-base sm:text-sm'>
+                          {wallet
+                            ? wallet.commissionWalletBalance.toFixed(2)
+                            : '0.00'}{' '}
+                          CC
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className='w-7 h-7 bg-zinc-900 border border-zinc-800 rounded-lg flex items-center justify-center text-zinc-400 shrink-0'>
+                      {isWalletExpanded ? (
+                        <ChevronUp className='w-4 h-4' />
+                      ) : (
+                        <ChevronDown className='w-4 h-4' />
+                      )}
+                    </div>
+                  </div>
                 </div>
-                <div>
-                  <h4 className='font-extrabold text-xs text-white uppercase tracking-tight'>
-                    Need help growing your business?
-                  </h4>
-                  <p className='text-zinc-400 text-xs mt-1 leading-relaxed font-light'>
-                    Ask your AI Business Coach how to get your first customers,
-                    invite members, and grow from Bronze to Silver.
-                  </p>
+
+                {/* Collapsible content */}
+                {isWalletExpanded && (
+                  <div className='p-6 bg-[#111318] animate-fadeIn space-y-6'>
+                    {/* Rest of Portfolio Grid (4 items: Commission, Marketing Support, Reward, and Cash Wallet) */}
+                    <div className='grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4'>
+                      {/* Commission Wallet */}
+                      <div className='bg-zinc-950 border border-cyan-800/80 rounded-2xl p-4 shadow-md relative overflow-hidden group'>
+                        <div className='flex justify-between items-start mb-2'>
+                          <span className='text-[11px] text-zinc-500 uppercase tracking-widest font-mono'>
+                            Total Earnings
+                          </span>
+                          <div className='w-8 h-8 bg-amber-500/10 rounded-md flex items-center justify-center border border-amber-500/25 text-amber-500'>
+                            <DollarSign className='w-5 h-5' />
+                          </div>
+                        </div>
+                        <div className='text-base font-black tracking-tight text-white mb-0.5'>
+                          {wallet
+                            ? wallet.commissionWalletBalance.toFixed(2)
+                            : '0.00'}{' '}
+                          CC
+                        </div>
+                        <div className='text-[11px] text-zinc-400 font-mono'>
+                          ≈ ₱
+                          {wallet
+                            ? (
+                                wallet.commissionWalletBalance *
+                                ccSettings.cashOutRatePHP
+                              ).toLocaleString()
+                            : '0'}
+                        </div>
+                      </div>
+
+                      {/* Marketing Support Wallet */}
+                      <div className='bg-zinc-950 border border-cyan-800/80 rounded-2xl p-4 shadow-md relative overflow-hidden'>
+                        <div className='flex justify-between items-start mb-2'>
+                          <span className='text-[11px] text-zinc-500 uppercase tracking-widest font-mono'>
+                            MSA
+                          </span>
+                          <div className='w-8 h-8 bg-blue-500/10 rounded-md flex items-center justify-center border border-blue-500/25 text-blue-400'>
+                            <ChartNoAxesCombined className='w-5 h-5' />
+                          </div>
+                        </div>
+                        <div className='text-base font-black tracking-tight text-white mb-0.5'>
+                          {wallet
+                            ? wallet.marketingSupportWalletBalance.toFixed(2)
+                            : '0.00'}{' '}
+                          CC
+                        </div>
+                        <div className='text-[11px] text-zinc-400 font-mono'>
+                          ≈ ₱
+                          {wallet
+                            ? (
+                                wallet.marketingSupportWalletBalance * 70
+                              ).toLocaleString()
+                            : '0'}
+                        </div>
+                        <div className='mt-3 h-6 flex items-center justify-center text-[8px] text-zinc-500 uppercase tracking-wider border border-zinc-900 bg-zinc-950 rounded-lg'>
+                          Locked Balance
+                        </div>
+                      </div>
+
+                      {/* Reward Wallet */}
+                      <div className='bg-zinc-950 border border-cyan-800/80 rounded-2xl p-4 shadow-md relative overflow-hidden'>
+                        <div className='flex justify-between items-start mb-2'>
+                          <span className='text-[9px] text-zinc-500 uppercase tracking-widest font-mono'>
+                            Today's Earnings
+                          </span>
+                          <div className='w-8 h-8 bg-emerald-500/10 rounded-md flex items-center justify-center border border-emerald-500/25 text-emerald-400'>
+                            <ChartCandlestick className='w-5 h-5' />
+                          </div>
+                        </div>
+                        <div className='text-base font-black tracking-tight text-white mb-0.5'>
+                          {wallet
+                            ? wallet.rewardWalletBalance.toFixed(2)
+                            : '0.00'}{' '}
+                          CC
+                        </div>
+                        <div className='text-[9px] text-zinc-400 font-mono'>
+                          ≈ ₱
+                          {wallet
+                            ? (wallet.rewardWalletBalance * 70).toLocaleString()
+                            : '0'}
+                        </div>
+                        <div className='mt-3 h-6 flex items-center justify-center text-[8px] text-zinc-500 uppercase tracking-wider border border-zinc-900 bg-zinc-950 rounded-lg'>
+                          Non-Withdrawable
+                        </div>
+                      </div>
+
+                      {/* Cash Wallet */}
+                      <div className='bg-zinc-950 border border-cyan-800/80 rounded-2xl p-4 shadow-md relative overflow-hidden'>
+                        <div className='flex justify-between items-start mb-2'>
+                          <span className='text-[9px] text-zinc-500 uppercase tracking-widest font-mono'>
+                            Withdrawable Balance
+                          </span>
+                          <div className='w-8 h-8 bg-teal-500/10 rounded-md flex items-center justify-center border border-teal-500/25 text-teal-400'>
+                            <BanknoteArrowDown className='w-5 h-5' />
+                          </div>
+                        </div>
+                        <div className='text-base font-black tracking-tight text-white mb-0.5'>
+                          {wallet
+                            ? wallet.rewardWalletBalance.toFixed(2)
+                            : '0.00'}{' '}
+                          CC
+                        </div>
+                        <div className='text-[9px] text-zinc-400 font-mono'>
+                          ≈ ₱
+                          {wallet
+                            ? (wallet.rewardWalletBalance * 70).toLocaleString()
+                            : '0'}
+                        </div>
+                        <button
+                          onClick={() => setShowCashoutModal(true)}
+                          className='mt-3 w-full bg-zinc-900 hover:bg-zinc-850 border border-zinc-800 hover:border-teal-500/40 text-white hover:text-teal-400 font-bold text-[9px] py-1.5 rounded-lg transition-all cursor-pointer flex items-center justify-center gap-1'
+                        >
+                          <ArrowUpRight className='w-3.5 h-3.5' /> Request
+                          Cash-Out
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Shared Role-Aware Performance Cards System */}
+              {!(
+                userProfile?.accountType === 'Customer' &&
+                userProfile?.packageLevel === 'None'
+              ) && (
+                <div className='my-6'>
+                  <DashboardPerformanceCards
+                    userProfile={userProfile}
+                    onNavigate={onNavigate}
+                    activeActionModal={activeActionModal}
+                    setActiveActionModal={setActiveActionModal}
+                    renderBusinessCycleProgress={renderBusinessCycleProgress}
+                    renderRecentActivities={renderRecentActivities}
+                  />
+                </div>
+              )}
+
+              {/* AI Coach Advice Banner */}
+              <div className='bg-zinc-950 border border-cyan-800/80 rounded-3xl p-6 shadow-xl relative overflow-hidden group'>
+                <div className='absolute top-0 right-0 w-32 h-32 bg-teal-500/5 rounded-full blur-3xl pointer-events-none' />
+                <div className='flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4'>
+                  <div className='flex items-start gap-3'>
+                    <div className='w-9 h-9 bg-teal-500/10 border border-teal-500/25 text-teal-400 rounded-xl flex items-center justify-center shrink-0 group-hover:scale-110 transition-transform'>
+                      <MessageSquare className='w-4 h-4' />
+                    </div>
+                    <div>
+                      <h4 className='font-extrabold text-xs text-white uppercase tracking-tight'>
+                        Need help growing your business?
+                      </h4>
+                      <p className='text-zinc-400 text-xs mt-1 leading-relaxed font-light'>
+                        Ask your AI Business Coach how to get your first
+                        customers, invite members, and grow from Bronze to
+                        Silver.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setShowAICoachModal(true)}
+                    className='bg-[#111318] border border-cyan-800 hover:border-cyan-500/40 hover:text-cyan-400 font-extrabold text-[10px] py-2 px-4 rounded-xl transition-all cursor-pointer flex items-center gap-1.5 uppercase tracking-wider shrink-0'
+                  >
+                    Ask AI Coach <Sparkles className='w-3 h-3 animate-pulse' />
+                  </button>
                 </div>
               </div>
-              <button
-                onClick={() => setShowAICoachModal(true)}
-                className='bg-[#111318] border border-cyan-800 hover:border-teal-500/50 hover:text-teal-400 font-extrabold text-[10px] py-2 px-4 rounded-xl transition-all cursor-pointer flex items-center gap-1.5 uppercase tracking-wider shrink-0'
-              >
-                Ask AI Coach <Sparkles className='w-3 h-3 animate-pulse' />
-              </button>
-            </div>
-          </div>
 
-          {/* Reusable Affiliate Growth & Referral Tools Section */}
-          <AffiliateGrowthToolsSection userProfile={userProfile} />
+              {/* Reusable Affiliate Growth & Referral Tools Section */}
+              <AffiliateGrowthToolsSection userProfile={userProfile} />
+            </>
+          )}
         </main>
 
         {/* P2P Transfer Modal */}
@@ -2272,6 +2359,133 @@ export default function AffiliateDashboard({
           </div>
         )}
 
+        {/* SECURED PACKAGE UPGRADE SUCCESS MODAL */}
+        {showUpgradeSuccessModal && upgradeResult && (
+          <div
+            className='fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/90 backdrop-blur-md animate-fadeIn overflow-y-auto'
+            role='dialog'
+            aria-modal='true'
+            aria-labelledby='upgrade-success-title'
+            aria-describedby='upgrade-success-description'
+          >
+            <div className='w-full max-w-lg bg-zinc-950 border border-emerald-500/25 rounded-3xl p-7 my-8 shadow-[0_24px_80px_rgba(0,0,0,0.75)] relative overflow-hidden'>
+              <div className='absolute top-0 inset-x-0 h-1.5 bg-gradient-to-r from-emerald-500 via-cyan-400 to-amber-400' />
+              <div className='absolute -right-12 -top-12 w-40 h-40 rounded-full bg-emerald-500/10 blur-[70px] pointer-events-none' />
+
+              <div className='relative'>
+                <div className='w-16 h-16 mx-auto rounded-2xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-400 flex items-center justify-center shadow-[0_0_30px_rgba(16,185,129,0.12)]'>
+                  <CheckCircle className='w-9 h-9' />
+                </div>
+
+                <div className='text-center mt-5'>
+                  <span className='inline-flex items-center gap-1.5 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 py-1 text-[9px] font-black uppercase tracking-[0.2em] text-emerald-400 font-mono'>
+                    <ShieldCheck className='w-3.5 h-3.5' />
+                    Secured Upgrade Completed
+                  </span>
+                  <h3
+                    id='upgrade-success-title'
+                    className='mt-4 text-2xl font-black uppercase tracking-tight text-white'
+                  >
+                    Affiliate Package Upgraded
+                  </h3>
+                  <p
+                    id='upgrade-success-description'
+                    className='mt-2 text-xs leading-relaxed text-zinc-400'
+                  >
+                    Your package, wallet debit, new Business Cycle, MSA
+                    entitlement, and compensation processing were confirmed by
+                    the secured package engine.
+                  </p>
+                </div>
+
+                <div className='mt-6 rounded-2xl border border-zinc-800 bg-[#0B0D12] p-5'>
+                  <div className='grid grid-cols-1 gap-3 text-xs sm:grid-cols-2'>
+                    <div>
+                      <span className='block text-[8px] font-black uppercase tracking-widest text-zinc-500 font-mono'>
+                        New Package
+                      </span>
+                      <span className='mt-1 block font-extrabold text-emerald-400'>
+                        {upgradeResult.packageLevel || selectedUpgradeLevel}
+                      </span>
+                    </div>
+                    <div>
+                      <span className='block text-[8px] font-black uppercase tracking-widest text-zinc-500 font-mono'>
+                        Wallet Debited
+                      </span>
+                      <span className='mt-1 block font-extrabold text-white font-mono'>
+                        {Number(upgradeResult.walletDebitedCC || 0).toFixed(2)}{' '}
+                        CC
+                      </span>
+                    </div>
+                    <div>
+                      <span className='block text-[8px] font-black uppercase tracking-widest text-zinc-500 font-mono'>
+                        Wallet Balance
+                      </span>
+                      <span className='mt-1 block font-extrabold text-cyan-400 font-mono'>
+                        {Number(
+                          upgradeResult.walletBalanceAfterCC || 0,
+                        ).toFixed(2)}{' '}
+                        CC
+                      </span>
+                    </div>
+                    <div>
+                      <span className='block text-[8px] font-black uppercase tracking-widest text-zinc-500 font-mono'>
+                        Final Status
+                      </span>
+                      <span className='mt-1 block font-extrabold text-emerald-400'>
+                        {upgradeResult.overallStatus ||
+                          upgradeResult.compensationStatus ||
+                          'COMPLETED'}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className='mt-4 border-t border-zinc-900 pt-4'>
+                    <span className='block text-[8px] font-black uppercase tracking-widest text-zinc-500 font-mono'>
+                      Activation Reference
+                    </span>
+                    <span className='mt-1 block break-all text-[10px] font-bold text-zinc-300 font-mono'>
+                      {upgradeResult.activationEventId || 'Confirmed'}
+                    </span>
+                  </div>
+                </div>
+
+                <div className='mt-5 rounded-2xl border border-cyan-500/15 bg-cyan-500/5 p-3.5 text-center'>
+                  <div className='flex items-center justify-center gap-2 text-[10px] font-bold uppercase tracking-wider text-cyan-300'>
+                    <RefreshCw
+                      className={`w-3.5 h-3.5 ${
+                        upgradeRedirecting ? 'animate-spin' : ''
+                      }`}
+                    />
+                    {upgradeRedirecting
+                      ? 'Refreshing your dashboard...'
+                      : `Returning to the main dashboard in ${upgradeRedirectSeconds} seconds`}
+                  </div>
+                </div>
+
+                <button
+                  type='button'
+                  onClick={returnToMainDashboardAfterUpgrade}
+                  disabled={upgradeRedirecting}
+                  className='mt-5 w-full bg-gradient-to-r from-emerald-500 to-cyan-500 hover:brightness-110 text-black py-3.5 rounded-xl text-xs font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60 disabled:cursor-wait'
+                >
+                  {upgradeRedirecting ? (
+                    <>
+                      <RefreshCw className='w-4 h-4 animate-spin' />
+                      Refreshing Dashboard
+                    </>
+                  ) : (
+                    <>
+                      Go to Main Dashboard Now
+                      <ChevronRight className='w-4 h-4' />
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Package Upgrade Modal */}
         {showUpgradeModal && (
           <div className='fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fadeIn overflow-y-auto'>
@@ -2294,6 +2508,58 @@ export default function AffiliateDashboard({
               {upgradeSuccess && (
                 <div className='bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 p-3 rounded-xl text-xs mb-4 font-bold text-center'>
                   {upgradeSuccess}
+                </div>
+              )}
+
+              {upgradeResult && (
+                <div className='mb-4 rounded-2xl border border-cyan-500/20 bg-cyan-500/5 p-4 text-[11px] text-zinc-300'>
+                  <div className='mb-3 text-[10px] font-black uppercase tracking-widest text-cyan-400'>
+                    Secured Activation Receipt
+                  </div>
+                  <div className='grid grid-cols-1 gap-2 font-mono sm:grid-cols-2'>
+                    <span>
+                      Event: {upgradeResult.activationEventId || 'Processing'}
+                    </span>
+                    <span>
+                      Transaction:{' '}
+                      {upgradeResult.packageTransactionId || 'Processing'}
+                    </span>
+                    <span>
+                      Business Cycle:{' '}
+                      {upgradeResult.businessCycleId || 'Processing'}
+                    </span>
+                    <span>
+                      MSA Entitlement:{' '}
+                      {upgradeResult.msaEntitlementId || 'Processing'}
+                    </span>
+                    <span>
+                      Direct Referral:{' '}
+                      {Number(upgradeResult.directReferralTotalCC || 0).toFixed(
+                        2,
+                      )}{' '}
+                      CC
+                    </span>
+                    <span>
+                      Indirect Referral:{' '}
+                      {Number(
+                        upgradeResult.indirectReferralTotalCC || 0,
+                      ).toFixed(2)}{' '}
+                      CC
+                    </span>
+                    <span>
+                      Leadership:{' '}
+                      {Number(
+                        upgradeResult.leadershipFromReferralTotalCC || 0,
+                      ).toFixed(2)}{' '}
+                      CC
+                    </span>
+                    <span>
+                      Status:{' '}
+                      {upgradeResult.compensationStatus ||
+                        upgradeResult.overallStatus ||
+                        'Submitted'}
+                    </span>
+                  </div>
                 </div>
               )}
 
@@ -2336,8 +2602,8 @@ export default function AffiliateDashboard({
                         Gold: 1500,
                         Platinum: 3000,
                         Diamond: 5000,
-                        'City Distributor': 25750,
-                        'Regional Distributor': 105000,
+                        'City Distributor': 25000,
+                        'Regional Distributor': 100000,
                       }
                       const currentVal =
                         valCCMap[userProfile.packageLevel || 'Bronze'] || 0
@@ -2361,8 +2627,8 @@ export default function AffiliateDashboard({
                       Gold: 1500,
                       Platinum: 3000,
                       Diamond: 5000,
-                      'City Distributor': 25750,
-                      'Regional Distributor': 105000,
+                      'City Distributor': 25000,
+                      'Regional Distributor': 100000,
                     }
                     const capCCMap: Record<string, number> = {
                       Bronze: 125,
@@ -2370,8 +2636,8 @@ export default function AffiliateDashboard({
                       Gold: 3750,
                       Platinum: 7500,
                       Diamond: 12500,
-                      'City Distributor': 64375,
-                      'Regional Distributor': 262500,
+                      'City Distributor': 62500,
+                      'Regional Distributor': 250000,
                     }
 
                     const currentLevel = userProfile.packageLevel || 'Bronze'
@@ -2381,9 +2647,9 @@ export default function AffiliateDashboard({
                     const targetVal = valCCMap[selectedUpgradeLevel] || 0
                     const targetCap = capCCMap[selectedUpgradeLevel] || 0
 
-                    const diffVal = targetVal - currentVal
+                    const fullPackagePriceCC = targetVal
                     const balance = wallet?.chosenWalletBalance || 0
-                    const isInsufficient = balance < diffVal
+                    const isInsufficient = balance < fullPackagePriceCC
 
                     return (
                       <div className='bg-zinc-900/60 border border-zinc-800/40 p-4 rounded-2xl text-xs space-y-3'>
@@ -2419,10 +2685,10 @@ export default function AffiliateDashboard({
 
                         <div className='border-t border-zinc-800/60 pt-3 flex justify-between items-center text-sm'>
                           <span className='font-bold text-zinc-300 uppercase tracking-wider text-[10px]'>
-                            Upgrade Cost (Difference):
+                            Full Package Price:
                           </span>
                           <span className='font-black text-gold font-mono text-base'>
-                            {diffVal.toFixed(2)} CC
+                            {fullPackagePriceCC.toFixed(2)} CC
                           </span>
                         </div>
 
@@ -2430,7 +2696,9 @@ export default function AffiliateDashboard({
                           <div className='mt-2 bg-red-500/10 border border-red-500/20 text-red-400 p-2.5 rounded-xl text-[11px] leading-relaxed'>
                             ⚠️ <strong>Insufficient credits.</strong> You need
                             an additional{' '}
-                            <strong>{(diffVal - balance).toFixed(2)} CC</strong>{' '}
+                            <strong>
+                              {(fullPackagePriceCC - balance).toFixed(2)} CC
+                            </strong>{' '}
                             to complete this upgrade. Please close this modal
                             and click "Cash-In" to top up.
                           </div>
@@ -2447,6 +2715,7 @@ export default function AffiliateDashboard({
                       setSelectedUpgradeLevel('')
                       setUpgradeError(null)
                       setUpgradeSuccess(null)
+                      setUpgradeResult(null)
                     }}
                     className='flex-1 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-400 py-2.5 rounded-xl text-sm font-bold transition-all cursor-pointer'
                   >
@@ -2464,13 +2733,15 @@ export default function AffiliateDashboard({
                           Gold: 1500,
                           Platinum: 3000,
                           Diamond: 5000,
-                          'City Distributor': 25750,
-                          'Regional Distributor': 105000,
+                          'City Distributor': 25000,
+                          'Regional Distributor': 100000,
                         }
-                        const diffVal =
-                          (valCCMap[selectedUpgradeLevel] || 0) -
-                          (valCCMap[userProfile.packageLevel || 'Bronze'] || 0)
-                        return (wallet?.chosenWalletBalance || 0) < diffVal
+                        const fullPackagePriceCC =
+                          valCCMap[selectedUpgradeLevel] || 0
+                        return (
+                          (wallet?.chosenWalletBalance || 0) <
+                          fullPackagePriceCC
+                        )
                       })()
                     }
                     className='flex-1 gold-gradient hover:brightness-110 text-black py-2.5 rounded-xl text-sm font-bold transition-all flex items-center justify-center gap-1 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed'
@@ -2646,241 +2917,6 @@ export default function AffiliateDashboard({
                     className='px-5 py-2 bg-gradient-to-r from-teal-500 to-emerald-500 hover:from-teal-400 hover:to-emerald-400 text-black font-extrabold text-xs uppercase tracking-wider rounded-xl cursor-pointer transition-all active:scale-95 shadow-md'
                   >
                     {loading ? 'Processing...' : 'Submit Cash-Out'}
-                  </button>
-                </div>
-              </form>
-            </div>
-          </div>
-        )}
-
-        {/* Cash-In Modal */}
-        {showCashinModal && (
-          <div className='fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fadeIn overflow-y-auto'>
-            <div className='w-full max-w-md bg-zinc-950 border border-zinc-800 rounded-3xl p-6 my-8 shadow-2xl relative'>
-              <div className='absolute top-0 inset-x-0 h-1 gold-gradient rounded-t-3xl' />
-
-              <h3 className='text-xl font-bold uppercase tracking-tight mb-2 text-white gold-text'>
-                Request Cash-In / Top Up
-              </h3>
-              <p className='text-xs text-zinc-500 uppercase tracking-widest font-mono mb-6'>
-                1 CC = ₱70.00 | Add usable credits to your Chosen Wallet
-              </p>
-
-              {cashinError && (
-                <div className='bg-red-500/10 border border-red-500/20 text-red-400 p-3 rounded-xl text-xs mb-4'>
-                  {cashinError}
-                </div>
-              )}
-
-              {cashinSuccess && (
-                <div className='bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 p-3 rounded-xl text-xs mb-4'>
-                  {cashinSuccess}
-                </div>
-              )}
-
-              <form onSubmit={handleCashinSubmit} className='space-y-4'>
-                <div>
-                  <label className='block text-xs uppercase tracking-wider text-zinc-400 font-semibold mb-2'>
-                    Amount in Philippine Pesos (PHP)
-                  </label>
-                  <div className='relative'>
-                    <span className='absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-500 text-sm font-mono font-bold'>
-                      ₱
-                    </span>
-                    <input
-                      type='number'
-                      required
-                      min='70'
-                      step='1'
-                      value={cashinAmountPhp}
-                      onChange={(e) =>
-                        setCashinAmountPhp(Number(e.target.value))
-                      }
-                      className='w-full bg-zinc-900 border border-zinc-800 focus:border-gold/60 rounded-xl pl-8 pr-4 py-2.5 text-sm font-mono focus:outline-none transition-colors text-white'
-                      placeholder='e.g. 3500'
-                    />
-                  </div>
-                </div>
-
-                <div className='bg-zinc-900/60 border border-zinc-800/40 p-4 rounded-2xl text-xs space-y-2'>
-                  <span className='block font-bold text-zinc-300 uppercase tracking-widest text-[10px] mb-1'>
-                    Auto-Computed Credits
-                  </span>
-                  <div className='flex justify-between'>
-                    <span className='text-zinc-500'>Rate:</span>
-                    <span className='text-white font-mono'>1 CC = ₱70.00</span>
-                  </div>
-                  <div className='flex justify-between border-t border-zinc-800/60 pt-2 mt-1 text-sm font-bold'>
-                    <span className='text-gold'>Computed CC:</span>
-                    <span className='text-gold font-mono'>
-                      {(cashinAmountPhp / 70).toFixed(4)} CC
-                    </span>
-                  </div>
-                </div>
-
-                <div>
-                  <label className='block text-xs uppercase tracking-wider text-zinc-400 font-semibold mb-2'>
-                    Payment Method / Target Account
-                  </label>
-                  <select
-                    value={cashinChannel}
-                    onChange={(e: any) => setCashinChannel(e.target.value)}
-                    className='w-full bg-zinc-900 border border-zinc-800 focus:border-gold/60 rounded-xl px-3 py-2.5 text-sm focus:outline-none transition-colors'
-                  >
-                    <option value='GCash'>
-                      GCash (Company: 0917-111-2222)
-                    </option>
-                    <option value='Maya'>Maya (Company: 0917-111-2222)</option>
-                    <option value='Bank'>
-                      Bank Transfer (BDO: 00123-4567-890)
-                    </option>
-                  </select>
-                </div>
-
-                <div className='grid grid-cols-2 gap-3'>
-                  <div>
-                    <label className='block text-xs uppercase tracking-wider text-zinc-400 font-semibold mb-2'>
-                      Sender Account Name
-                    </label>
-                    <input
-                      type='text'
-                      placeholder='e.g. Juan dela Cruz'
-                      value={cashinAccountName}
-                      onChange={(e) => setCashinAccountName(e.target.value)}
-                      className='w-full bg-zinc-900 border border-zinc-800 focus:border-gold/60 rounded-xl px-4 py-2.5 text-sm focus:outline-none transition-colors text-white'
-                    />
-                  </div>
-                  <div>
-                    <label className='block text-xs uppercase tracking-wider text-zinc-400 font-semibold mb-2'>
-                      Sender Account Number
-                    </label>
-                    <input
-                      type='text'
-                      placeholder='e.g. 0917-123-4567'
-                      value={cashinAccountNumber}
-                      onChange={(e) => setCashinAccountNumber(e.target.value)}
-                      className='w-full bg-zinc-900 border border-zinc-800 focus:border-gold/60 rounded-xl px-4 py-2.5 text-sm focus:outline-none transition-colors text-white'
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label className='block text-xs uppercase tracking-wider text-zinc-400 font-semibold mb-2'>
-                    Transaction Reference Number
-                  </label>
-                  <input
-                    type='text'
-                    required
-                    placeholder='Paste reference / receipt transaction code'
-                    value={cashinReference}
-                    onChange={(e) => setCashinReference(e.target.value)}
-                    className='w-full bg-zinc-900 border border-zinc-800 focus:border-gold/60 rounded-xl px-4 py-2.5 text-sm focus:outline-none transition-colors text-white'
-                  />
-                </div>
-
-                {/* Drag-and-drop & Click to Upload Region */}
-                <div>
-                  <label className='block text-xs uppercase tracking-wider text-zinc-400 font-semibold mb-2'>
-                    Upload Proof of Payment Receipt (Required)
-                  </label>
-                  <div
-                    onDragOver={(e) => {
-                      e.preventDefault()
-                      setIsDragging(true)
-                    }}
-                    onDragLeave={() => setIsDragging(false)}
-                    onDrop={handleFileDrop}
-                    className={`border-2 border-dashed rounded-2xl p-4 text-center cursor-pointer transition-all ${
-                      isDragging
-                        ? 'border-gold bg-gold/5'
-                        : proofOfPaymentUrl
-                          ? 'border-emerald-500/50 bg-emerald-500/5'
-                          : 'border-zinc-800 hover:border-gold/40'
-                    }`}
-                    onClick={() =>
-                      document
-                        .getElementById('affiliate-cashin-file-upload')
-                        ?.click()
-                    }
-                  >
-                    <input
-                      id='affiliate-cashin-file-upload'
-                      type='file'
-                      accept='image/*,application/pdf'
-                      className='hidden'
-                      onChange={handleFileSelect}
-                    />
-
-                    {proofOfPaymentUrl ? (
-                      <div className='space-y-2'>
-                        {proofOfPaymentUrl.startsWith('data:application/pdf') ||
-                        receiptFile?.type === 'application/pdf' ||
-                        proofOfPaymentUrl.toLowerCase().includes('.pdf') ? (
-                          <div className='text-xs font-semibold text-emerald-400'>
-                            PDF Document Selected
-                          </div>
-                        ) : (
-                          <img
-                            src={proofOfPaymentUrl}
-                            alt='Proof of Payment Preview'
-                            className='max-h-24 mx-auto rounded object-contain border border-zinc-800'
-                          />
-                        )}
-                        <p className='text-[10px] text-zinc-500'>
-                          Click or drag another file to replace receipt
-                        </p>
-                      </div>
-                    ) : (
-                      <div className='py-2 space-y-1'>
-                        <div className='text-zinc-400 font-bold text-xs'>
-                          Drag and Drop receipt image here
-                        </div>
-                        <div className='text-[10px] text-zinc-500'>
-                          or click to browse from device
-                        </div>
-                        <div className='text-[9px] text-zinc-600 font-mono uppercase'>
-                          Supports Images and PDFs
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* Optional Notes field */}
-                <div>
-                  <label className='block text-xs uppercase tracking-wider text-zinc-400 font-semibold mb-2'>
-                    Additional Notes (Optional)
-                  </label>
-                  <textarea
-                    placeholder='e.g. Payment details, branch name, or any additional message...'
-                    value={cashinNotes}
-                    onChange={(e) => setCashinNotes(e.target.value)}
-                    className='w-full bg-zinc-900 border border-zinc-800 focus:border-gold/60 rounded-xl px-4 py-2 text-xs focus:outline-none transition-colors h-16 resize-none text-white'
-                  />
-                </div>
-
-                <div className='flex gap-3 pt-2'>
-                  <button
-                    type='button'
-                    onClick={() => {
-                      setShowCashinModal(false)
-                      setProofOfPaymentUrl('')
-                      setCashinNotes('')
-                    }}
-                    className='flex-1 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-400 py-2.5 rounded-xl text-sm font-bold transition-all cursor-pointer'
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type='submit'
-                    disabled={loading}
-                    className='flex-1 gold-gradient hover:brightness-110 text-black py-2.5 rounded-xl text-sm font-bold transition-all flex items-center justify-center gap-1 cursor-pointer'
-                  >
-                    {loading ? (
-                      <div className='w-5 h-5 border-2 border-black border-t-transparent rounded-full animate-spin' />
-                    ) : (
-                      'Submit Cash-In'
-                    )}
                   </button>
                 </div>
               </form>

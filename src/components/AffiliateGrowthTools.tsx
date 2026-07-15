@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import {
   Link2,
   Copy,
@@ -34,13 +34,14 @@ export function AffiliateGrowthToolsSection({
 
   return (
     <div className='space-y-6 mt-6' id='affiliate-growth-tools'>
-      <div className='grid grid-cols-1 xl:grid-cols-3 gap-6'>
-        {/* Referral Link Card takes 2 columns on extra large screens */}
-        <div className='xl:col-span-2'>
+      <div className='grid grid-cols-1 gap-6'>
+        {/* Full-width single-column referral link card */}
+        <div className='w-full min-w-0'>
           <AffiliateReferralLinkCard sponsorCode={userProfile.sponsorCode} />
         </div>
-        {/* Community Card takes 1 column */}
-        <div>
+
+        {/* Community card remains available below the referral card */}
+        <div className='w-full min-w-0'>
           <AffiliateCommunityCard />
         </div>
       </div>
@@ -57,6 +58,7 @@ export function AffiliateReferralLinkCard({
 }: AffiliateReferralLinkCardProps) {
   const [copySuccess, setCopySuccess] = useState(false)
   const [copyError, setCopyError] = useState<string | null>(null)
+  const referralInputRef = useRef<HTMLInputElement>(null)
 
   const cleanSponsorCode = sponsorCode?.trim() || ''
   const referralUrl = cleanSponsorCode
@@ -68,17 +70,53 @@ export function AffiliateReferralLinkCard({
       })
     : ''
 
+  const copyWithFallback = async (value: string): Promise<void> => {
+    // Modern Clipboard API works only in secure contexts such as HTTPS or localhost.
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(value)
+      return
+    }
+
+    // Fallback for browsers or deployments where Clipboard API is unavailable.
+    const textArea = document.createElement('textarea')
+    textArea.value = value
+    textArea.setAttribute('readonly', '')
+    textArea.style.position = 'fixed'
+    textArea.style.left = '-9999px'
+    textArea.style.top = '0'
+    textArea.style.opacity = '0'
+
+    document.body.appendChild(textArea)
+    textArea.focus()
+    textArea.select()
+    textArea.setSelectionRange(0, textArea.value.length)
+
+    const copied = document.execCommand('copy')
+    document.body.removeChild(textArea)
+
+    if (!copied) {
+      throw new Error('Clipboard copy command was rejected.')
+    }
+  }
+
   const handleCopy = async () => {
     if (!referralUrl) return
+
     setCopyError(null)
+
     try {
-      await navigator.clipboard.writeText(referralUrl)
+      await copyWithFallback(referralUrl)
       setCopySuccess(true)
-      setTimeout(() => setCopySuccess(false), 2000)
+      window.setTimeout(() => setCopySuccess(false), 2000)
     } catch (err) {
       console.error('Failed to copy referral link:', err)
+
+      // Keep a final manual fallback ready by selecting the visible field.
+      referralInputRef.current?.focus()
+      referralInputRef.current?.select()
+
       setCopyError(
-        'We could not copy the referral link. Please select and copy it manually.',
+        'Automatic copy is blocked by this browser. The referral link has been selected—press Ctrl+C or long-press Copy.',
       )
     }
   }
@@ -95,13 +133,9 @@ export function AffiliateReferralLinkCard({
 
   return (
     <div
-      className='bg-[#0b0d13] border border-cyan-500/10 rounded-3xl p-6 shadow-xl relative overflow-hidden group'
+      className='w-full min-w-0 bg-[#0b0d13] border border-cyan-800/80 rounded-3xl p-6 shadow-xl relative overflow-hidden group'
       id='affiliate-referral-card'
     >
-      {/* Visual neon line accent */}
-      <div className='absolute top-0 inset-x-0 h-[2px] bg-cyan-500/30 group-hover:bg-cyan-500/50 transition-colors' />
-      <div className='absolute top-0 right-0 w-32 h-32 bg-cyan-500/5 rounded-full blur-3xl pointer-events-none' />
-
       <div className='flex flex-col lg:flex-row lg:items-center justify-between gap-6'>
         {/* Left Side: Header */}
         <div className='flex items-start gap-4'>
@@ -124,10 +158,12 @@ export function AffiliateReferralLinkCard({
             <div className='flex flex-col sm:flex-row items-stretch gap-2.5'>
               <div className='relative flex-1 min-w-0'>
                 <input
+                  ref={referralInputRef}
                   type='text'
                   readOnly
                   value={referralUrl}
-                  onClick={(e) => (e.target as HTMLInputElement).select()}
+                  onFocus={(e) => e.currentTarget.select()}
+                  onClick={(e) => e.currentTarget.select()}
                   className='w-full bg-zinc-950/80 border border-zinc-800 focus:border-cyan-500/50 rounded-xl px-4 py-3 text-xs text-zinc-300 font-medium select-all focus:outline-none transition-colors overflow-x-auto'
                   aria-label='Referral URL'
                 />
@@ -151,6 +187,7 @@ export function AffiliateReferralLinkCard({
                 ) : (
                   <>
                     <Copy className='w-4 h-4' />
+                    <span>Copy Link</span>
                   </>
                 )}
               </button>
@@ -293,13 +330,9 @@ export function AffiliateCommunityCard() {
 
   return (
     <div
-      className='bg-[#0b0d13] border border-cyan-500/10 rounded-3xl p-6 shadow-xl relative overflow-hidden group h-full flex flex-col justify-between'
+      className='bg-[#0b0d13] border border-cyan-800/80 rounded-3xl p-6 shadow-xl relative overflow-hidden group h-full flex flex-col justify-between'
       id='affiliate-community-card'
     >
-      {/* Visual neon line accent */}
-      <div className='absolute top-0 inset-x-0 h-[2px] bg-cyan-500/30 group-hover:bg-cyan-500/50 transition-colors' />
-      <div className='absolute top-0 right-0 w-32 h-32 bg-cyan-500/5 rounded-full blur-3xl pointer-events-none' />
-
       <div>
         {/* Header aligned left */}
         <div className='flex items-start gap-4 mb-5'>
