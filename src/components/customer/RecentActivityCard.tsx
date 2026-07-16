@@ -24,6 +24,7 @@ type AccountType = 'Customer' | 'Smart Customer' | 'Affiliate'
 
 type ActivityType =
   | 'CASHIN'
+  | 'ADMIN_DEPOSIT'
   | 'CASHOUT'
   | 'ORDER'
   | 'PAYOUT'
@@ -50,6 +51,7 @@ interface RecentActivityCardProps {
 
   accountType?: AccountType
   layoutVariant?: LayoutVariant
+  /** @deprecated Recent activities are fixed at 8 records per page. */
   pageSize?: number
   className?: string
   visibleTabs?: readonly ActivityFilter[]
@@ -100,6 +102,8 @@ const AFFILIATE_ACTIVITY_TABS: readonly ActivityFilter[] = [
   'withdrawals',
   'orders',
 ]
+
+const ACTIVITIES_PER_PAGE = 8
 
 function toRecord(value: unknown): UnknownRecord {
   return typeof value === 'object' && value !== null
@@ -206,12 +210,14 @@ function getP2PRecordId(value: unknown, index: number): string {
     transfer.requestId,
     transfer.referenceId,
     transfer.referenceNumber,
+    transfer.sourceTransferId,
     transfer.transactionId,
     transfer.idempotencyKey,
     transfer.id,
     metadata.transferId,
     metadata.requestId,
     metadata.referenceId,
+    metadata.sourceTransferId,
     metadata.transactionId,
     metadata.idempotencyKey,
   )
@@ -268,26 +274,212 @@ function dedupeP2PRecords(records: unknown[]): unknown[] {
   })
 }
 
-function normalizeCommissionName(value: string): string {
-  const normalized = value
-    .trim()
-    .toUpperCase()
-    .replaceAll('-', '_')
-    .replaceAll(' ', '_')
+function formatOrdinalLevel(value: number): string {
+  const level = Math.max(1, Math.trunc(value))
+  const remainder100 = level % 100
+
+  if (remainder100 >= 11 && remainder100 <= 13) {
+    return `${level}th`
+  }
+
+  switch (level % 10) {
+    case 1:
+      return `${level}st`
+    case 2:
+      return `${level}nd`
+    case 3:
+      return `${level}rd`
+    default:
+      return `${level}th`
+  }
+}
+
+function readCommissionLevel(record: UnknownRecord): number {
+  const metadata = toRecord(record.metadata)
+
+  const level = readNumber(
+    record.genealogyLevel,
+    record.referralLevel,
+    record.leadershipLevel,
+    record.unilevelLevel,
+    record.commissionLevel,
+    record.uplineLevel,
+    record.requiredDepth,
+    record.level,
+    record.depth,
+    metadata.genealogyLevel,
+    metadata.referralLevel,
+    metadata.leadershipLevel,
+    metadata.unilevelLevel,
+    metadata.commissionLevel,
+    metadata.uplineLevel,
+    metadata.requiredDepth,
+    metadata.level,
+    metadata.depth,
+  )
+
+  return Number.isFinite(level) && level > 0 ? Math.trunc(level) : 0
+}
+
+function getCommissionLevelLabel(record: UnknownRecord): string {
+  const level = readCommissionLevel(record)
+
+  return level > 0 ? `${formatOrdinalLevel(level)} Level` : ''
+}
+
+function readCommissionSourceToken(record: UnknownRecord): string {
+  const metadata = toRecord(record.metadata)
+
+  return normalizeToken(
+    readString(
+      record.leadershipSourceType,
+      record.commissionSourceType,
+      record.sourceType,
+      record.sourceCommissionType,
+      record.earningSourceType,
+      metadata.leadershipSourceType,
+      metadata.commissionSourceType,
+      metadata.sourceType,
+      metadata.sourceCommissionType,
+      metadata.earningSourceType,
+    ),
+  )
+}
+
+function getCommissionSourceLabel(record: UnknownRecord): string {
+  const metadata = toRecord(record.metadata)
+  const sourceType = readCommissionSourceToken(record)
+
+  if (sourceType === 'MSA_DAILY_ACCRUAL') {
+    return 'Daily MSA Accrual'
+  }
+
+  if (sourceType === 'MSA_CREDIT') {
+    return 'MSA Wallet Release'
+  }
+
+  if (sourceType.includes('MSA')) {
+    return 'Marketing Support Allocation'
+  }
+
+  if (sourceType.includes('UNILEVEL')) {
+    return 'Product Unilevel'
+  }
+
+  if (
+    sourceType.includes('REFERRAL') ||
+    sourceType.includes('PACKAGE_ACTIVATION')
+  ) {
+    return 'Referral Bonus'
+  }
+
+  const referralClassification = normalizeToken(
+    readString(
+      record.referralBonusType,
+      record.referralType,
+      record.bonusType,
+      metadata.referralBonusType,
+      metadata.referralType,
+      metadata.bonusType,
+    ),
+  )
+
+  if (referralClassification.includes('DIRECT')) {
+    return 'Direct Referral'
+  }
+
+  if (referralClassification.includes('INDIRECT')) {
+    return 'Indirect Referral'
+  }
+
+  return readString(
+    record.commissionSourceLabel,
+    metadata.commissionSourceLabel,
+  )
+}
+
+function normalizeCommissionName(
+  value: string,
+  record: UnknownRecord = {},
+): string {
+  const metadata = toRecord(record.metadata)
+
+  const normalized = normalizeToken(
+    readString(
+      record.commissionType,
+      record.bonusType,
+      record.earningType,
+      value,
+      metadata.commissionType,
+      metadata.bonusType,
+      metadata.earningType,
+    ),
+  )
+
+  const commissionLevel = readCommissionLevel(record)
+  const commissionSourceType = readCommissionSourceToken(record)
+
+  // Direct MSA Leadership, MSA Leadership, and related aliases are one
+  // Leadership Bonus generated from the same daily MSA accrual. "Direct"
+  // is represented by Commission Level: 1st Level.
+  const isMsaLeadership =
+    normalized.includes('LEADERSHIP') &&
+    (normalized.includes('MSA') || commissionSourceType.includes('MSA'))
+
+  if (isMsaLeadership) {
+    return 'Leadership Bonus'
+  }
+
+  const referralClassification = normalizeToken(
+    readString(
+      record.referralBonusType,
+      record.referralType,
+      record.category,
+      record.sourceType,
+      metadata.referralBonusType,
+      metadata.referralType,
+      metadata.category,
+      metadata.sourceType,
+    ),
+  )
 
   switch (normalized) {
     case 'DIRECT_REFERRAL':
     case 'DIRECT_REFERRAL_BONUS':
+      return 'Direct Referral Bonus'
+
     case 'INDIRECT_REFERRAL':
     case 'INDIRECT_REFERRAL_BONUS':
+      return 'Indirect Referral Bonus'
+
     case 'REFERRAL_BONUS':
     case 'REFERRAL_BONUSES':
-    case 'UNILEVEL':
+      if (referralClassification.includes('INDIRECT') || commissionLevel > 1) {
+        return 'Indirect Referral Bonus'
+      }
+
+      if (referralClassification.includes('DIRECT') || commissionLevel === 1) {
+        return 'Direct Referral Bonus'
+      }
+
       return 'Referral Bonus'
+
+    case 'UNILEVEL':
+    case 'UNILEVEL_BONUS':
+      return 'Unilevel Bonus'
 
     case 'LEADERSHIP':
     case 'LEADERSHIP_BONUS':
+    case 'MSA_LEADERSHIP':
+    case 'MSA_DIRECT_LEADERSHIP':
+    case 'DIRECT_MSA_LEADERSHIP':
+    case 'MSA_INDIRECT_LEADERSHIP':
+    case 'INDIRECT_MSA_LEADERSHIP':
       return 'Leadership Bonus'
+
+    case 'LEADERSHIP_REWARD':
+    case 'LEADERSHIP_REWARDS':
+      return 'Leadership Reward'
 
     case 'INFINITY':
     case 'INFINITY_BONUS':
@@ -298,8 +490,10 @@ function normalizeCommissionName(value: string): string {
     case 'MARKETING_SUPPORT':
     case 'MARKETING_SUPPORT_ALLOCATION':
     case 'MSA':
+    case 'MSA_DAILY_ACCRUAL':
       return 'Marketing Support Allocation'
 
+    case 'RETAIL':
     case 'RETAIL_PROFIT':
       return 'Retail Profit'
 
@@ -308,6 +502,122 @@ function normalizeCommissionName(value: string): string {
         .replaceAll('_', ' ')
         .replace(/\b\w/g, (character) => character.toUpperCase())
   }
+}
+
+function getEarningDedupeKey(record: UnknownRecord, index: number): string {
+  const metadata = toRecord(record.metadata)
+
+  const commissionType =
+    readString(
+      record.commissionType,
+      record.bonusType,
+      record.earningType,
+      record.type,
+      metadata.commissionType,
+      metadata.bonusType,
+      metadata.earningType,
+      metadata.type,
+    ) || 'Commission'
+
+  const operation = normalizeToken(
+    normalizeCommissionName(commissionType, record),
+  )
+
+  const msaDailySourceId = readString(
+    record.sourceMsaDailyAccrualId,
+    metadata.sourceMsaDailyAccrualId,
+  )
+
+  const underlyingSourceId = readString(
+    msaDailySourceId,
+    record.sourceMsaCreditId,
+    record.sourceReferralBonusId,
+    record.sourceUnilevelCommissionId,
+    record.sourceInfinityCommissionId,
+    record.sourceRetailProfitId,
+    record.sourceRewardId,
+    record.sourceRecordId,
+    record.sourceEventId,
+    record.activationEventId,
+    record.packageActivationEventId,
+    metadata.sourceMsaCreditId,
+    metadata.sourceReferralBonusId,
+    metadata.sourceUnilevelCommissionId,
+    metadata.sourceInfinityCommissionId,
+    metadata.sourceRetailProfitId,
+    metadata.sourceRewardId,
+    metadata.sourceRecordId,
+    metadata.sourceEventId,
+    metadata.activationEventId,
+    metadata.packageActivationEventId,
+  )
+
+  const earnerUid = readString(
+    record.earnerUid,
+    record.uid,
+    record.userUid,
+    record.ownerUid,
+    metadata.earnerUid,
+    metadata.uid,
+    metadata.userUid,
+    metadata.ownerUid,
+  )
+
+  const level = readCommissionLevel(record)
+  const sourceToken = readCommissionSourceToken(record)
+
+  const isMsaLeadershipEarning =
+    operation === 'LEADERSHIP_BONUS' &&
+    (Boolean(msaDailySourceId) ||
+      sourceToken.includes('MSA') ||
+      normalizeToken(underlyingSourceId).includes('MSA_DAILY'))
+
+  if (underlyingSourceId) {
+    if (isMsaLeadershipEarning) {
+      return [
+        'earning-source',
+        'LEADERSHIP_BONUS',
+        earnerUid || 'unknown-earner',
+        underlyingSourceId,
+      ].join(':')
+    }
+
+    return [
+      'earning-source',
+      operation,
+      earnerUid || 'unknown-earner',
+      underlyingSourceId,
+      level || 0,
+    ].join(':')
+  }
+
+  const commissionId = readString(
+    record.commissionId,
+    record.sourceCommissionId,
+    metadata.commissionId,
+    metadata.sourceCommissionId,
+  )
+
+  if (commissionId) {
+    return `earning-commission:${commissionId}`
+  }
+
+  const referenceId = readString(
+    record.referenceNumber,
+    record.transactionId,
+    record.id,
+    metadata.referenceNumber,
+    metadata.transactionId,
+    metadata.id,
+  )
+
+  return [
+    'earning-fallback',
+    operation,
+    earnerUid || 'unknown-earner',
+    referenceId || index,
+    level || 0,
+  ].join(':')
 }
 
 function formatDateTime(value: string): string {
@@ -351,7 +661,11 @@ function formatPHP(amount: number): string {
 }
 
 function getActivityIcon(activity: NormalizedActivity) {
-  if (activity.type === 'CASHIN' || activity.type === 'P2P_RECEIVE') {
+  if (
+    activity.type === 'CASHIN' ||
+    activity.type === 'ADMIN_DEPOSIT' ||
+    activity.type === 'P2P_RECEIVE'
+  ) {
     return <ArrowDownToLine className='h-4 w-4' />
   }
 
@@ -395,6 +709,7 @@ function getActivityColors(type: ActivityType): {
 } {
   switch (type) {
     case 'CASHIN':
+    case 'ADMIN_DEPOSIT':
     case 'P2P_RECEIVE':
       return {
         dot: 'bg-emerald-500',
@@ -426,10 +741,35 @@ function getActivityColors(type: ActivityType): {
   }
 }
 
+function isEarnedActivity(activity: NormalizedActivity): boolean {
+  if (activity.type !== 'PAYOUT') {
+    return false
+  }
+
+  const status = normalizeToken(activity.status)
+
+  return status === 'CREDITED' || status === 'COMPLETED'
+}
+
+function ActivityStatusBadge({ activity }: { activity: NormalizedActivity }) {
+  if (isEarnedActivity(activity)) {
+    return (
+      <span className='inline-flex min-h-6 items-center rounded-full border border-emerald-400/25 bg-emerald-500/10 px-2.5 py-1 text-[9px] font-black uppercase tracking-wide text-emerald-400'>
+        Earned
+      </span>
+    )
+  }
+
+  return <StatusBadge status={activity.status} />
+}
+
 function getModalTitle(type: ActivityType): string {
   switch (type) {
     case 'CASHIN':
       return 'Cash-In Ledger'
+
+    case 'ADMIN_DEPOSIT':
+      return 'Direct CC Deposit Ledger'
 
     case 'P2P_RECEIVE':
       return 'Received P2P Transfer'
@@ -454,7 +794,7 @@ function getEmptyDescription(filter: ActivityFilter): string {
       return 'No commission earnings have been recorded yet.'
 
     case 'deposits':
-      return 'No Cash-In or received P2P deposits have been recorded yet.'
+      return 'No Cash-In, Direct CC Deposit, or received P2P deposits have been recorded yet.'
 
     case 'withdrawals':
       return 'No Cash-Out or sent P2P withdrawals have been recorded yet.'
@@ -477,7 +817,6 @@ export default function RecentActivityCard({
   currentUid = '',
   accountType = 'Customer',
   layoutVariant = 'compact',
-  pageSize,
   className = '',
   visibleTabs,
 }: RecentActivityCardProps) {
@@ -497,8 +836,6 @@ export default function RecentActivityCard({
     settings.purchaseRatePHP,
     settings.cashInRatePHP,
   )
-
-  const resolvedPageSize = pageSize ?? (layoutVariant === 'wide' ? 6 : 3)
 
   const resolvedVisibleFilters = useMemo<ActivityFilter[]>(() => {
     if (visibleTabs && visibleTabs.length > 0) {
@@ -556,6 +893,90 @@ export default function RecentActivityCard({
         }
       }),
     [cashins],
+  )
+
+  const normalizedAdminDeposits = useMemo<NormalizedActivity[]>(
+    () =>
+      walletTransactions
+        .map((item) => toRecord(item))
+        .filter((transaction) => {
+          const transactionType = normalizeToken(
+            readString(
+              transaction.transactionType,
+              transaction.type,
+              transaction.sourceType,
+              transaction.depositType,
+            ),
+          )
+          const direction = normalizeToken(
+            readString(transaction.direction, transaction.entryType),
+          )
+          const walletType = normalizeToken(readString(transaction.walletType))
+
+          const isAdminDeposit =
+            transactionType === 'ADMIN_DIRECT_CC_DEPOSIT' ||
+            transactionType === 'DIRECT_CC_DEPOSIT' ||
+            transactionType === 'DIRECT_ADMIN_DEPOSIT' ||
+            transactionType === 'ADMIN_WALLET_CREDIT' ||
+            transactionType === 'MANUAL_CC_DEPOSIT'
+
+          const isChosenWallet =
+            !walletType ||
+            walletType === 'CHOSEN_WALLET' ||
+            walletType === 'CHOSEN' ||
+            walletType === 'CHOSEN_CREDITS_CC'
+
+          return (
+            isAdminDeposit &&
+            isChosenWallet &&
+            (!direction || direction === 'CREDIT')
+          )
+        })
+        .map((transaction, index) => {
+          const amountCC = readNumber(
+            transaction.amountCC,
+            transaction.amount,
+            transaction.creditAmountCC,
+          )
+          const adminName = readString(
+            transaction.adminName,
+            transaction.creditedByName,
+            transaction.approvedBy,
+          )
+          const referenceNumber =
+            readString(
+              transaction.referenceNumber,
+              transaction.depositId,
+              transaction.transactionId,
+              transaction.id,
+            ) || `admin-deposit-${index}`
+
+          return {
+            id: referenceNumber,
+            type: 'ADMIN_DEPOSIT',
+            title: 'Direct CC Deposit',
+            subtitle: adminName
+              ? `Credited by ${adminName}`
+              : 'Credited by I AM CHOSEN Administration',
+            referenceNumber,
+            status: readString(transaction.status) || 'Completed',
+            amountCC,
+            amountPhp:
+              readNumber(
+                transaction.phpEquivalent,
+                transaction.amountPhp,
+                transaction.amountPHP,
+              ) || amountCC * displayReferenceRatePHP,
+            date: readDate(
+              transaction.completedAt,
+              transaction.createdAt,
+              transaction.timestamp,
+              transaction.updatedAt,
+            ),
+            raw: transaction,
+          }
+        }),
+    [displayReferenceRatePHP, walletTransactions],
   )
 
   const normalizedCashouts = useMemo<NormalizedActivity[]>(
@@ -617,10 +1038,89 @@ export default function RecentActivityCard({
     [displayReferenceRatePHP, orders],
   )
 
-  const commissionRecords = useMemo(
-    () => [...commissions, ...payouts],
-    [commissions, payouts],
+  // Canonical member earnings are readable from both the commissions ledger
+  // and immutable wallet_transactions. The wallet ledger also exposes daily
+  // MSA accruals, which are not commission documents.
+  const walletEarningRecords = useMemo(
+    () =>
+      walletTransactions
+        .map((item) => toRecord(item))
+        .filter((transaction) => {
+          const transactionType = normalizeToken(
+            readString(transaction.transactionType, transaction.type),
+          )
+          const walletType = normalizeToken(readString(transaction.walletType))
+          const direction = normalizeToken(readString(transaction.direction))
+
+          const isCommissionCredit =
+            transactionType === 'COMMISSION_CREDIT' &&
+            walletType === 'COMMISSION_WALLET'
+
+          const isDailyMsa =
+            transactionType === 'MSA_DAILY_ACCRUAL' &&
+            walletType === 'MARKETING_SUPPORT_WALLET'
+
+          return (
+            (isCommissionCredit || isDailyMsa) &&
+            (!direction || direction === 'CREDIT')
+          )
+        })
+        .map((transaction) => {
+          const transactionType = normalizeToken(
+            readString(transaction.transactionType, transaction.type),
+          )
+          const isDailyMsa = transactionType === 'MSA_DAILY_ACCRUAL'
+
+          const earningId =
+            readString(
+              transaction.sourceCommissionId,
+              transaction.sourceMsaDailyAccrualId,
+              transaction.referenceNumber,
+              transaction.id,
+            ) || undefined
+
+          return {
+            ...transaction,
+            id: earningId,
+            commissionId: earningId,
+            commissionType: isDailyMsa
+              ? 'Marketing Support Allocation'
+              : readString(transaction.commissionType) || 'Commission',
+            amountCC: readNumber(transaction.amountCC, transaction.amount),
+            description:
+              readString(transaction.description) ||
+              (isDailyMsa
+                ? 'Daily Marketing Support Wallet accrual'
+                : 'Commission Wallet credit'),
+            status: readString(transaction.status) || 'Credited',
+            createdAt: readDate(
+              transaction.completedAt,
+              transaction.createdAt,
+              transaction.timestamp,
+            ),
+          }
+        }),
+    [walletTransactions],
   )
+
+  const commissionRecords = useMemo(() => {
+    // Prefer authoritative commission documents. Wallet ledger entries remain
+    // a fallback for older or delayed commission records.
+    const records = [...commissions, ...payouts, ...walletEarningRecords]
+    const seen = new Set<string>()
+
+    return records.filter((item, index) => {
+      const record = toRecord(item)
+      const dedupeKey = getEarningDedupeKey(record, index)
+
+      if (seen.has(dedupeKey)) {
+        return false
+      }
+
+      seen.add(dedupeKey)
+      return true
+    })
+  }, [commissions, payouts, walletEarningRecords])
 
   const normalizedPayouts = useMemo<NormalizedActivity[]>(
     () =>
@@ -630,14 +1130,17 @@ export default function RecentActivityCard({
         const commissionType =
           readString(payout.commissionType, payout.type) || 'Commission'
 
-        const title = normalizeCommissionName(commissionType)
+        const title = normalizeCommissionName(commissionType, payout)
         const amountCC = readNumber(payout.amountCC, payout.amount)
 
         return {
           id: readString(payout.id, payout.commissionId) || `payout-${index}`,
           type: 'PAYOUT',
           title,
-          subtitle: readString(payout.description) || 'Commission income',
+          subtitle:
+            getCommissionSourceLabel(payout) ||
+            readString(payout.description) ||
+            'Commission income',
           referenceNumber:
             readString(payout.id, payout.commissionId) || 'Unavailable',
           status: readString(payout.status) || 'Completed',
@@ -705,6 +1208,16 @@ export default function RecentActivityCard({
           metadata.type,
         ),
       )
+      const sourceType = normalizeToken(
+        readString(
+          transfer.sourceTransferType,
+          transfer.sourceType,
+          transfer.transferType,
+          metadata.sourceTransferType,
+          metadata.sourceType,
+          metadata.transferType,
+        ),
+      )
       const direction = normalizeToken(
         readString(
           transfer.direction,
@@ -715,10 +1228,22 @@ export default function RecentActivityCard({
           metadata.flow,
         ),
       )
+      // The transfer fee is included in totalDebitCC on the canonical send.
+      // Do not render the separate fee ledger as another withdrawal.
+      const isFeeRecord =
+        recordType.includes('FEE') || sourceType.includes('FEE')
+
+      if (isFeeRecord) {
+        return
+      }
+
       const isP2PType =
         recordType.includes('P2P') ||
         recordType.includes('PEER_TO_PEER') ||
-        recordType.includes('MEMBER_TRANSFER')
+        recordType.includes('MEMBER_TRANSFER') ||
+        sourceType.includes('P2P') ||
+        sourceType.includes('PEER_TO_PEER') ||
+        sourceType.includes('MEMBER_TRANSFER')
 
       const isReceivedType =
         (isP2PType &&
@@ -933,9 +1458,11 @@ export default function RecentActivityCard({
         return [...normalizedPayouts].sort(sortNewestFirst)
 
       case 'deposits':
-        return [...normalizedCashins, ...normalizedP2PReceived].sort(
-          sortNewestFirst,
-        )
+        return [
+          ...normalizedCashins,
+          ...normalizedAdminDeposits,
+          ...normalizedP2PReceived,
+        ].sort(sortNewestFirst)
 
       case 'withdrawals':
         return [...normalizedCashouts, ...normalizedP2PSent].sort(
@@ -947,6 +1474,7 @@ export default function RecentActivityCard({
     }
   }, [
     filter,
+    normalizedAdminDeposits,
     normalizedCashins,
     normalizedCashouts,
     normalizedOrders,
@@ -957,32 +1485,65 @@ export default function RecentActivityCard({
 
   const totalPages = Math.max(
     1,
-    Math.ceil(filteredActivities.length / resolvedPageSize),
+    Math.ceil(filteredActivities.length / ACTIVITIES_PER_PAGE),
   )
+
+  // Clamp during render so async Firestore updates, deduplication, and tab
+  // changes never render an out-of-range or partially corrupted page.
+  const currentPage = Math.min(Math.max(page, 1), totalPages)
 
   useEffect(() => {
-    if (page > totalPages) {
-      setPage(totalPages)
+    if (page !== currentPage) {
+      setPage(currentPage)
     }
-  }, [page, totalPages])
+  }, [currentPage, page])
 
-  const visibleActivities = filteredActivities.slice(
-    (page - 1) * resolvedPageSize,
-    page * resolvedPageSize,
+  const pageStartIndex = (currentPage - 1) * ACTIVITIES_PER_PAGE
+  const pageEndIndex = pageStartIndex + ACTIVITIES_PER_PAGE
+
+  const visibleActivities = useMemo(
+    () =>
+      filteredActivities
+        .slice(pageStartIndex, pageEndIndex)
+        .slice(0, ACTIVITIES_PER_PAGE),
+    [filteredActivities, pageEndIndex, pageStartIndex],
   )
+
+  // A unique page render key forces React to discard the previous page rows
+  // instead of reconciling them with new records that may reuse ledger IDs.
+  const pageRenderKey = `${filter}:${currentPage}:${filteredActivities.length}`
 
   const firstVisibleItem =
-    filteredActivities.length === 0 ? 0 : (page - 1) * resolvedPageSize + 1
+    filteredActivities.length === 0 ? 0 : pageStartIndex + 1
 
-  const lastVisibleItem = Math.min(
-    page * resolvedPageSize,
-    filteredActivities.length,
-  )
+  const lastVisibleItem = Math.min(pageEndIndex, filteredActivities.length)
 
   const notes = selectedActivity ? readString(selectedActivity.raw.notes) : ''
 
   const rejectionReason = selectedActivity
     ? readString(selectedActivity.raw.rejectedReason)
+    : ''
+
+  const selectedActivityMetadata = selectedActivity
+    ? toRecord(selectedActivity.raw.metadata)
+    : {}
+
+  const relatedMemberId = selectedActivity
+    ? selectedActivity.type === 'P2P_SEND'
+      ? readString(
+          selectedActivity.raw.recipientMemberId,
+          selectedActivity.raw.toMemberId,
+          selectedActivityMetadata.recipientMemberId,
+          selectedActivityMetadata.toMemberId,
+        )
+      : selectedActivity.type === 'P2P_RECEIVE'
+        ? readString(
+            selectedActivity.raw.senderMemberId,
+            selectedActivity.raw.fromMemberId,
+            selectedActivityMetadata.senderMemberId,
+            selectedActivityMetadata.fromMemberId,
+          )
+        : ''
     : ''
 
   return (
@@ -1046,6 +1607,9 @@ export default function RecentActivityCard({
           />
         ) : (
           <div
+            key={pageRenderKey}
+            data-activity-page={currentPage}
+            data-activity-page-size={ACTIVITIES_PER_PAGE}
             className={[
               'relative ml-3 space-y-5 border-l border-zinc-800/80 py-1 pl-5 pr-2',
               layoutVariant === 'wide'
@@ -1053,21 +1617,19 @@ export default function RecentActivityCard({
                 : 'max-h-[350px] overflow-y-auto scrollbar-thin',
             ].join(' ')}
           >
-            {visibleActivities.map((activity) => {
+            {visibleActivities.map((activity, visibleIndex) => {
               const colors = getActivityColors(activity.type)
+              const rowKey = [
+                pageRenderKey,
+                activity.type,
+                activity.id,
+                visibleIndex,
+              ].join(':')
 
               return (
-                <motion.button
-                  key={activity.id}
+                <button
+                  key={rowKey}
                   type='button'
-                  initial={{
-                    opacity: 0,
-                    x: -10,
-                  }}
-                  animate={{
-                    opacity: 1,
-                    x: 0,
-                  }}
                   onClick={() => setSelectedActivity(activity)}
                   className='group relative block w-full text-left'
                 >
@@ -1122,17 +1684,17 @@ export default function RecentActivityCard({
                         {formatPHP(activity.amountPhp)}
                       </span>
 
-                      <StatusBadge status={activity.status} />
+                      <ActivityStatusBadge activity={activity} />
                     </span>
                   </span>
-                </motion.button>
+                </button>
               )
             })}
           </div>
         )}
       </div>
 
-      {filteredActivities.length > resolvedPageSize && (
+      {filteredActivities.length > ACTIVITIES_PER_PAGE && (
         <footer className='flex items-center justify-between border-t border-zinc-800 pt-4'>
           <span className='text-xs text-zinc-500 tabular-nums'>
             {firstVisibleItem}–{lastVisibleItem} of {filteredActivities.length}
@@ -1142,24 +1704,22 @@ export default function RecentActivityCard({
             <button
               type='button'
               aria-label='Previous activity page'
-              disabled={page <= 1}
-              onClick={() => setPage((current) => Math.max(1, current - 1))}
+              disabled={currentPage <= 1}
+              onClick={() => setPage(Math.max(1, currentPage - 1))}
               className='flex h-10 w-10 items-center justify-center rounded-xl border border-zinc-800 text-zinc-400 hover:bg-zinc-900 disabled:cursor-not-allowed disabled:opacity-30'
             >
               <ChevronLeft className='h-4 w-4' />
             </button>
 
             <span className='text-xs text-zinc-400 tabular-nums'>
-              {page} / {totalPages}
+              {currentPage} / {totalPages}
             </span>
 
             <button
               type='button'
               aria-label='Next activity page'
-              disabled={page >= totalPages}
-              onClick={() =>
-                setPage((current) => Math.min(totalPages, current + 1))
-              }
+              disabled={currentPage >= totalPages}
+              onClick={() => setPage(Math.min(totalPages, currentPage + 1))}
               className='flex h-10 w-10 items-center justify-center rounded-xl border border-zinc-800 text-zinc-400 hover:bg-zinc-900 disabled:cursor-not-allowed disabled:opacity-30'
             >
               <ChevronRight className='h-4 w-4' />
@@ -1220,6 +1780,24 @@ export default function RecentActivityCard({
               <div className='space-y-3.5 text-xs'>
                 <DetailRow label='Operation' value={selectedActivity.title} />
 
+                {selectedActivity.type === 'PAYOUT' && (
+                  <>
+                    {getCommissionSourceLabel(selectedActivity.raw) && (
+                      <DetailRow
+                        label='Commission Source'
+                        value={getCommissionSourceLabel(selectedActivity.raw)}
+                      />
+                    )}
+
+                    {getCommissionLevelLabel(selectedActivity.raw) && (
+                      <DetailRow
+                        label='Commission Level'
+                        value={getCommissionLevelLabel(selectedActivity.raw)}
+                      />
+                    )}
+                  </>
+                )}
+
                 <DetailRow
                   label={
                     selectedActivity.type === 'CASHIN'
@@ -1228,6 +1806,17 @@ export default function RecentActivityCard({
                   }
                   value={selectedActivity.referenceNumber}
                 />
+
+                {relatedMemberId && (
+                  <DetailRow
+                    label={
+                      selectedActivity.type === 'P2P_SEND'
+                        ? 'Recipient Member ID'
+                        : 'Sender Member ID'
+                    }
+                    value={relatedMemberId.toUpperCase()}
+                  />
+                )}
 
                 <DetailRow
                   label='Amount'
@@ -1248,9 +1837,13 @@ export default function RecentActivityCard({
                 />
 
                 <div className='flex items-center justify-between gap-5 py-1'>
-                  <span className='text-zinc-500'>Ledger Status:</span>
+                  <span className='text-zinc-500'>
+                    {selectedActivity.type === 'PAYOUT'
+                      ? 'Earning Status:'
+                      : 'Ledger Status:'}
+                  </span>
 
-                  <StatusBadge status={selectedActivity.status} />
+                  <ActivityStatusBadge activity={selectedActivity} />
                 </div>
               </div>
 

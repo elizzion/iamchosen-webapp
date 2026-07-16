@@ -2375,7 +2375,10 @@ type PackageAccountPathV2 = 'Affiliate' | 'Smart Customer'
 
 type ReferralBonusTypeV2 = 'Direct' | 'Indirect'
 
-type LeadershipSourceTypeV2 = 'REFERRAL_BONUS' | 'MSA_CREDIT'
+type LeadershipSourceTypeV2 =
+  | 'REFERRAL_BONUS'
+  | 'MSA_CREDIT'
+  | 'MSA_DAILY_ACCRUAL'
 
 interface ActivatePackageRequestV2 {
   packageId: string
@@ -2407,17 +2410,26 @@ interface UplineNodeV2 {
   genealogyLevel: number
 }
 
+type CommissionIncomeTypeV2 =
+  | 'Referral Bonus'
+  | 'Leadership Bonus'
+  | 'Unilevel Bonus'
+  | 'Retail Profit'
+  | 'Infinity Bonus'
+  | 'Leadership Reward'
+
 interface CommissionCreditInputV2 {
   idempotencyKey: string
   activationEventId: string
   sourceUid: string
   sourceMemberId: string
   earnerUid: string
-  commissionType: 'Referral Bonus' | 'Leadership Bonus'
+  commissionType: CommissionIncomeTypeV2
   referralBonusType?: ReferralBonusTypeV2
   leadershipSourceType?: LeadershipSourceTypeV2
   sourceCommissionId?: string
   sourceMsaCreditId?: string
+  sourceMsaDailyAccrualId?: string
   sourceCommissionAmountCC?: number
   level: number
   rate: number
@@ -2592,6 +2604,169 @@ function deterministicFinancialIdV2(prefix: string, value: string): string {
     .slice(0, 30)
     .toUpperCase()
   return `${prefix}-${digest}`
+}
+
+
+interface IncomeNotificationWriteInputV2 {
+  beneficiaryUid: string
+  sourceId: string
+  incomeType: string
+  label: string
+  amountCC: number
+  sourceType: string
+  sourceMemberId?: string
+  sourceCommissionId?: string
+  sourceMsaCreditId?: string
+  sourceMsaDailyAccrualId?: string
+  genealogyLevel?: number
+  title?: string
+  message?: string
+  createdAt: string
+}
+
+function ordinalLevelV2(levelValue: number): string {
+  const level = Math.max(1, Math.trunc(levelValue))
+  const remainder100 = level % 100
+
+  if (remainder100 >= 11 && remainder100 <= 13) {
+    return `${level}th`
+  }
+
+  switch (level % 10) {
+    case 1:
+      return `${level}st`
+    case 2:
+      return `${level}nd`
+    case 3:
+      return `${level}rd`
+    default:
+      return `${level}th`
+  }
+}
+
+function resolveCommissionIncomeDescriptorV2(
+  input: CommissionCreditInputV2,
+): {
+  incomeType: string
+  label: string
+  sourceType: string
+} {
+  if (input.commissionType === 'Referral Bonus') {
+    if (input.referralBonusType === 'Direct' || input.level === 1) {
+      return {
+        incomeType: 'DIRECT_REFERRAL_BONUS',
+        label: 'Direct Referral Bonus',
+        sourceType: 'REFERRAL_BONUS',
+      }
+    }
+
+    return {
+      incomeType: 'INDIRECT_REFERRAL_BONUS',
+      label:
+        input.level > 1
+          ? `Indirect Referral Bonus – ${ordinalLevelV2(input.level)} Level`
+          : 'Indirect Referral Bonus',
+      sourceType: 'REFERRAL_BONUS',
+    }
+  }
+
+  if (input.commissionType === 'Leadership Bonus') {
+    if (
+      input.leadershipSourceType === 'MSA_DAILY_ACCRUAL' ||
+      input.leadershipSourceType === 'MSA_CREDIT'
+    ) {
+      return {
+        incomeType: 'MSA_LEADERSHIP_BONUS',
+        label: `MSA Leadership – ${ordinalLevelV2(input.level)} Level`,
+        sourceType: input.leadershipSourceType,
+      }
+    }
+
+    if (input.level === 1) {
+      return {
+        incomeType: 'DIRECT_LEADERSHIP',
+        label: 'Direct Leadership',
+        sourceType: input.leadershipSourceType || 'REFERRAL_BONUS',
+      }
+    }
+
+    return {
+      incomeType: 'INDIRECT_LEADERSHIP',
+      label: `Indirect Leadership – ${ordinalLevelV2(input.level)} Level`,
+      sourceType: input.leadershipSourceType || 'REFERRAL_BONUS',
+    }
+  }
+
+  const fallbackIncomeTypes: Record<CommissionIncomeTypeV2, string> = {
+    'Referral Bonus': 'REFERRAL_BONUS',
+    'Leadership Bonus': 'LEADERSHIP_BONUS',
+    'Unilevel Bonus': 'UNILEVEL_BONUS',
+    'Retail Profit': 'RETAIL_PROFIT',
+    'Infinity Bonus': 'INFINITY_BONUS',
+    'Leadership Reward': 'LEADERSHIP_REWARD',
+  }
+
+  return {
+    incomeType:
+      fallbackIncomeTypes[input.commissionType] || 'COMMISSION_INCOME',
+    label: input.commissionType,
+    sourceType: input.commissionType
+      .toUpperCase()
+      .replaceAll(' ', '_'),
+  }
+}
+
+function queueIncomeNotificationV2(
+  transaction: Transaction,
+  input: IncomeNotificationWriteInputV2,
+): string {
+  const notificationId = deterministicFinancialIdV2(
+    'NOTIF-INCOME',
+    `${input.sourceId}:income-notification`,
+  )
+
+  const amountCC = roundCCV2(input.amountCC)
+  const sourceMemberLabel = cleanStringV2(input.sourceMemberId)
+  const title = input.title || `${input.label} Earned`
+  const message =
+    input.message ||
+    (sourceMemberLabel
+      ? `You earned ${amountCC.toFixed(4)} CC as ${input.label} from ${sourceMemberLabel}.`
+      : `You earned ${amountCC.toFixed(4)} CC as ${input.label}.`)
+
+  transaction.set(db.collection('notifications').doc(notificationId), {
+    id: notificationId,
+    notificationId,
+    uid: input.beneficiaryUid,
+    title,
+    message,
+    desc: message,
+    date: input.createdAt,
+    type: 'Income',
+    category: 'EARNINGS',
+    incomeType: input.incomeType,
+    incomeLabel: input.label,
+    amountCC,
+    unread: true,
+    isRead: false,
+    targetView: 'recent-earnings',
+    actionUrl: null,
+    sourceId: input.sourceId,
+    sourceType: input.sourceType,
+    sourceMemberId: sourceMemberLabel || null,
+    sourceCommissionId: input.sourceCommissionId || null,
+    sourceMsaCreditId: input.sourceMsaCreditId || null,
+    sourceMsaDailyAccrualId: input.sourceMsaDailyAccrualId || null,
+    genealogyLevel:
+      Number.isFinite(input.genealogyLevel) &&
+      Number(input.genealogyLevel) > 0
+        ? Math.trunc(Number(input.genealogyLevel))
+        : null,
+    createdAt: input.createdAt,
+    readAt: null,
+  })
+
+  return notificationId
 }
 
 function requestFingerprintV2(
@@ -3071,6 +3246,8 @@ async function creditCommissionV2(
         leadershipSourceType: input.leadershipSourceType || null,
         sourceCommissionId: input.sourceCommissionId || null,
         sourceMsaCreditId: input.sourceMsaCreditId || null,
+        sourceMsaDailyAccrualId:
+          input.sourceMsaDailyAccrualId || null,
         sourceActivationEventId: input.activationEventId,
         balanceBefore: commissionWalletBefore,
         balanceAfter: commissionWalletAfter,
@@ -3079,6 +3256,26 @@ async function creditCommissionV2(
         idempotencyKey: `${input.idempotencyKey}:ledger`,
         createdAt: timestamp,
         completedAt: timestamp,
+      })
+
+      const incomeDescriptor =
+        resolveCommissionIncomeDescriptorV2(input)
+
+      queueIncomeNotificationV2(transaction, {
+        beneficiaryUid: input.earnerUid,
+        sourceId: commissionId,
+        incomeType: incomeDescriptor.incomeType,
+        label: incomeDescriptor.label,
+        amountCC: creditedAmountCC,
+        sourceType: incomeDescriptor.sourceType,
+        sourceMemberId: input.sourceMemberId,
+        sourceCommissionId:
+          input.sourceCommissionId || commissionId,
+        sourceMsaCreditId: input.sourceMsaCreditId,
+        sourceMsaDailyAccrualId:
+          input.sourceMsaDailyAccrualId,
+        genealogyLevel: input.level,
+        createdAt: timestamp,
       })
     }
 
@@ -3143,6 +3340,8 @@ async function creditCommissionV2(
       leadershipSourceType: input.leadershipSourceType || null,
       sourceCommissionId: input.sourceCommissionId || null,
       sourceMsaCreditId: input.sourceMsaCreditId || null,
+      sourceMsaDailyAccrualId:
+        input.sourceMsaDailyAccrualId || null,
       sourceCommissionAmountCC: input.sourceCommissionAmountCC || null,
       level: input.level,
       referralLevel: input.referralBonusType ? input.level : null,
@@ -3237,10 +3436,15 @@ async function processLeadershipFromQualifiedSourceV2(input: {
     const calculatedAmountCC = roundCCV2(input.qualifiedAmountCC * (rate / 100))
     if (calculatedAmountCC <= 0) continue
 
-    const idempotencyKey =
+    const leadershipSourcePrefix =
       input.sourceType === 'REFERRAL_BONUS'
-        ? `leadership-referral:${input.sourceRecordId}:${upline.uid}:${leadershipLevel}:${input.config.leadershipRuleVersion}`
-        : `leadership-msa:${input.sourceRecordId}:${upline.uid}:${leadershipLevel}:${input.config.leadershipRuleVersion}`
+        ? 'leadership-referral'
+        : input.sourceType === 'MSA_DAILY_ACCRUAL'
+          ? 'leadership-msa-daily'
+          : 'leadership-msa-credit'
+
+    const idempotencyKey =
+      `${leadershipSourcePrefix}:${input.sourceRecordId}:${upline.uid}:${leadershipLevel}:${input.config.leadershipRuleVersion}`
 
     const result = await creditCommissionV2(
       {
@@ -3256,7 +3460,13 @@ async function processLeadershipFromQualifiedSourceV2(input: {
             ? input.sourceRecordId
             : undefined,
         sourceMsaCreditId:
-          input.sourceType === 'MSA_CREDIT' ? input.sourceRecordId : undefined,
+          input.sourceType === 'MSA_CREDIT'
+            ? input.sourceRecordId
+            : undefined,
+        sourceMsaDailyAccrualId:
+          input.sourceType === 'MSA_DAILY_ACCRUAL'
+            ? input.sourceRecordId
+            : undefined,
         sourceCommissionAmountCC: input.qualifiedAmountCC,
         level: leadershipLevel,
         rate,
@@ -3758,7 +3968,7 @@ async function createOrLoadActivationCoreV2(input: {
         startDate: timestamp,
         lastAccruedDate: null,
         lastCreditedDate: null,
-        nextTransferSchedule: '15TH_AND_LAST_DAY_AT_13:00_ASIA_MANILA',
+        nextTransferSchedule: '15TH_AND_LAST_DAY_AT_01:00_ASIA_MANILA',
         ruleId: input.config.msaRuleId,
         ruleVersion: input.config.msaRuleVersion,
         configurationVersion: input.config.version,
@@ -4186,6 +4396,10 @@ function manilaDatePartsV2(date: Date): {
   }
 }
 
+function manilaDateKeyV2(date: Date): string {
+  return manilaDatePartsV2(date).isoDate
+}
+
 function monthsSinceStartV2(startDate: string, now: Date): number {
   const start = new Date(startDate)
   if (Number.isNaN(start.getTime())) return 1
@@ -4338,13 +4552,24 @@ async function processSingleMsaEntitlementV2(
     }
 
     const rate = msaRateForMonthV2(monthNumber, config)
-    const fundCC = Number(
+    const packageValueCC = Number(entitlementData.packageValueCC || 0)
+    const msaFundPercentage = Number(
+      entitlementData.msaFundPercentage || config.msaFundPercentage,
+    )
+    const storedFundCC = Number(
       entitlementData.entitlementAmountCC ?? entitlementData.amountCC ?? 0,
     )
-    const { year, month } = manilaDatePartsV2(now)
-    const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate()
+
+    // Legacy entitlements may not contain entitlementAmountCC. Recover the
+    // canonical fund from package value x MSA fund percentage.
+    const fundCC =
+      storedFundCC > 0
+        ? storedFundCC
+        : roundCCV2(packageValueCC * (msaFundPercentage / 100))
+
+    const dailyDivisorDays = 30
     const rawDailyAllocationCC = roundCCV2(
-      (fundCC * (rate / 100)) / daysInMonth,
+      (fundCC * (rate / 100)) / dailyDivisorDays,
     )
     const alreadyAccruedToday =
       cleanStringV2(entitlementData.lastAccruedDate) === today
@@ -4426,9 +4651,19 @@ async function processSingleMsaEntitlementV2(
     }
 
     transaction.update(entitlementRef, {
+      entitlementAmountCC: fundCC,
+      amountCC: fundCC,
+      packageValueCC,
+      msaFundPercentage,
       monthlyRatePercentage: rate,
       currentMonthNumber: monthNumber,
+      dailyDivisorDays,
       dailyAllocationCC: rawDailyAllocationCC,
+      calculationFormula:
+        '(packageValueCC Ã— msaFundPercentage Ã— monthlyRatePercentage) Ã· 30',
+      accrualTime: '01:00',
+      accrualTimeZone: 'Asia/Manila',
+      nextTransferSchedule: '15TH_AND_LAST_DAY_AT_01:00_ASIA_MANILA',
       lastAccruedDate: alreadyAccruedToday
         ? entitlementData.lastAccruedDate
         : today,
@@ -4443,6 +4678,73 @@ async function processSingleMsaEntitlementV2(
         transferAmountCC > 0 ? today : entitlementData.lastCreditedDate || null,
       updatedAt: timestamp,
     })
+
+    if (!alreadyAccruedToday && rawDailyAllocationCC > 0) {
+      const dailyAccrualId = deterministicFinancialIdV2(
+        'MSA-DAILY',
+        `${entitlementId}:${today}`,
+      )
+
+      transaction.set(
+        db.collection('msa_daily_accruals').doc(dailyAccrualId),
+        {
+          id: dailyAccrualId,
+          dailyAccrualId,
+          entitlementId,
+          activationEventId,
+          uid: beneficiaryUid,
+          memberId: beneficiaryMemberId,
+          packageLevel: cleanStringV2(entitlementData.packageLevel),
+          packageValueCC,
+          msaFundPercentage,
+          entitlementAmountCC: fundCC,
+          currentMonthNumber: monthNumber,
+          monthlyRatePercentage: rate,
+          dailyDivisorDays,
+          grossDailyAllocationCC: rawDailyAllocationCC,
+          qualifiedAmountCC: qualifiedDailyAllocationCC,
+          flushedAmountCC: flushedDailyAllocationCC,
+          accrualDate: today,
+          scheduledTime: '01:00',
+          timeZone: 'Asia/Manila',
+          status:
+            qualifiedDailyAllocationCC > 0
+              ? flushedDailyAllocationCC > 0
+                ? 'Partially Accrued'
+                : 'Accrued'
+              : 'Flushed',
+          leadershipStatus:
+            qualifiedDailyAllocationCC > 0 ? 'PENDING' : 'NOT_APPLICABLE',
+          leadershipCount: 0,
+          leadershipTotalCC: 0,
+          ruleId: config.msaRuleId,
+          ruleVersion: config.msaRuleVersion,
+          configurationVersion: config.version,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        },
+        { merge: false },
+      )
+
+      if (qualifiedDailyAllocationCC > 0) {
+        const dailyMessage =
+          `${qualifiedDailyAllocationCC.toFixed(4)} CC was accrued to your Marketing Support Wallet for ${today}.`
+
+        queueIncomeNotificationV2(transaction, {
+          beneficiaryUid,
+          sourceId: dailyAccrualId,
+          incomeType: 'MARKETING_SUPPORT_ALLOCATION',
+          label: 'Marketing Support Allocation',
+          amountCC: qualifiedDailyAllocationCC,
+          sourceType: 'MSA_DAILY_ACCRUAL',
+          sourceMemberId: beneficiaryMemberId,
+          sourceMsaDailyAccrualId: dailyAccrualId,
+          title: 'Marketing Support Allocation Accrued',
+          message: dailyMessage,
+          createdAt: timestamp,
+        })
+      }
+    }
 
     if (flushedDailyAllocationCC > 0) {
       const flushBankData = flushBankSnap.exists
@@ -4483,6 +4785,8 @@ async function processSingleMsaEntitlementV2(
       })
     }
 
+    // The semi-monthly wallet transfer releases previously announced MSA.
+    // It must not create another income notification for the same accruals.
     if (transferAmountCC > 0) {
       const marketingDebitId = deterministicFinancialIdV2(
         'TX-MSA-DEBIT',
@@ -4504,7 +4808,7 @@ async function processSingleMsaEntitlementV2(
         amountCC: transferAmountCC,
         creditPeriod: today,
         status: 'Credited',
-        leadershipStatus: 'PENDING',
+        leadershipStatus: 'PROCESSED_FROM_DAILY_ACCRUALS',
         leadershipTotalCC: 0,
         ruleId: config.msaRuleId,
         ruleVersion: config.msaRuleVersion,
@@ -4583,33 +4887,113 @@ async function processSingleMsaEntitlementV2(
   })
 }
 
-async function finalizeMsaLeadershipV2(input: {
-  msaCreditId: string
+async function ensureMsaDailyWalletLedgerV2(input: {
+  dailyAccrualId: string
+  activationEventId: string
+  dailyData: Record<string, unknown>
+}): Promise<void> {
+  const amountCC = roundCCV2(
+    Number(input.dailyData.qualifiedAmountCC || 0),
+  )
+
+  if (amountCC <= 0) return
+
+  const beneficiaryUid = cleanStringV2(input.dailyData.uid)
+  if (!beneficiaryUid) return
+
+  const ledgerId = deterministicFinancialIdV2(
+    'LEDGER-MSA-DAILY',
+    `${input.dailyAccrualId}:wallet-ledger`,
+  )
+  const ledgerRef = db.collection('wallet_transactions').doc(ledgerId)
+
+  await db.runTransaction(async (transaction: Transaction) => {
+    const ledgerSnap = await transaction.get(ledgerRef)
+    if (ledgerSnap.exists) return
+
+    const createdAt =
+      cleanStringV2(input.dailyData.createdAt) ||
+      new Date().toISOString()
+    const accrualDate = cleanStringV2(input.dailyData.accrualDate)
+    const packageLevel = cleanStringV2(input.dailyData.packageLevel)
+    const memberId = cleanStringV2(input.dailyData.memberId)
+    const activationEventId =
+      cleanStringV2(input.activationEventId) ||
+      cleanStringV2(input.dailyData.activationEventId)
+
+    transaction.set(ledgerRef, {
+      id: ledgerId,
+      transactionId: ledgerId,
+      uid: beneficiaryUid,
+      memberId,
+      amount: amountCC,
+      amountCC,
+      type: 'CREDIT',
+      direction: 'Credit',
+      walletType: 'Marketing Support Wallet',
+      transactionType: 'MSA_DAILY_ACCRUAL',
+      commissionType: 'Marketing Support Allocation',
+      sourceType: 'MSA_DAILY_ACCRUAL',
+      sourceMsaDailyAccrualId: input.dailyAccrualId,
+      sourceActivationEventId: activationEventId || null,
+      packageLevel,
+      accrualDate,
+      description:
+        `Daily Marketing Support Allocation${accrualDate ? ` for ${accrualDate}` : ''}`,
+      referenceNumber: input.dailyAccrualId,
+      idempotencyKey: `${input.dailyAccrualId}:wallet-ledger`,
+      status: 'Completed',
+      createdAt,
+      completedAt: createdAt,
+      timestamp: createdAt,
+    })
+  })
+}
+
+async function finalizeMsaDailyLeadershipV2(input: {
+  dailyAccrualId: string
   activationEventId: string
   leadershipCount: number
   leadershipTotalCC: number
 }): Promise<void> {
-  const creditRef = db.collection('msa_credits').doc(input.msaCreditId)
-  const reportRef = db
-    .collection('package_activation_reports')
-    .doc(input.activationEventId)
+  const dailyAccrualRef = db
+    .collection('msa_daily_accruals')
+    .doc(input.dailyAccrualId)
+
+  const activationEventId = cleanStringV2(input.activationEventId)
+  const reportRef = activationEventId
+    ? db.collection('package_activation_reports').doc(activationEventId)
+    : null
 
   await db.runTransaction(async (transaction: Transaction) => {
-    const creditSnap = await transaction.get(creditRef)
-    const reportSnap = await transaction.get(reportRef)
-    if (!creditSnap.exists) return
-    const creditData = creditSnap.data() || {}
-    if (creditData.leadershipStatus === 'COMPLETED') return
+    // All reads must happen before writes.
+    const dailyAccrualSnap = await transaction.get(dailyAccrualRef)
+    const reportSnap = reportRef
+      ? await transaction.get(reportRef)
+      : null
 
-    const reportData = reportSnap.exists ? reportSnap.data() || {} : {}
+    if (!dailyAccrualSnap.exists) return
+
+    const dailyData = dailyAccrualSnap.data() || {}
+    if (dailyData.leadershipStatus === 'COMPLETED') return
+
+    const reportData =
+      reportSnap && reportSnap.exists ? reportSnap.data() || {} : {}
     const timestamp = new Date().toISOString()
-    transaction.update(creditRef, {
+
+    transaction.update(dailyAccrualRef, {
+      activationEventId:
+        activationEventId ||
+        cleanStringV2(dailyData.activationEventId) ||
+        null,
       leadershipStatus: 'COMPLETED',
       leadershipCount: input.leadershipCount,
       leadershipTotalCC: input.leadershipTotalCC,
+      leadershipCompletedAt: timestamp,
       updatedAt: timestamp,
     })
-    if (reportSnap.exists) {
+
+    if (reportRef && reportSnap && reportSnap.exists) {
       transaction.update(reportRef, {
         leadershipFromMsaCount:
           Number(reportData.leadershipFromMsaCount || 0) +
@@ -4648,34 +5032,112 @@ async function processMsaEntitlementsV2(now: Date): Promise<{
     )
     processed += 1
 
+    const accrualDate = manilaDateKeyV2(now)
+    const dailyAccrualId = deterministicFinancialIdV2(
+      'MSA-DAILY',
+      `${entitlementDoc.id}:${accrualDate}`,
+    )
+    const effectiveActivationEventId =
+      cleanStringV2(result.activationEventId) ||
+      deterministicFinancialIdV2(
+        'LEGACY-MSA-EVENT',
+        entitlementDoc.id,
+      )
+
+    if (!cleanStringV2(result.activationEventId)) {
+      await db
+        .collection('msa_entitlements')
+        .doc(entitlementDoc.id)
+        .set(
+          {
+            activationEventId: effectiveActivationEventId,
+            activationEventSource: 'LEGACY_MSA_RECOVERY',
+            updatedAt: new Date().toISOString(),
+          },
+          { merge: true },
+        )
+    }
+
+    const dailyAccrualRef = db
+      .collection('msa_daily_accruals')
+      .doc(dailyAccrualId)
+    const dailyAccrualSnap = await dailyAccrualRef.get()
+
+    if (dailyAccrualSnap.exists) {
+      const dailyData = dailyAccrualSnap.data() || {}
+
+      if (!cleanStringV2(dailyData.activationEventId)) {
+        await dailyAccrualRef.set(
+          {
+            activationEventId: effectiveActivationEventId,
+            activationEventSource:
+              cleanStringV2(result.activationEventId)
+                ? 'PACKAGE_ACTIVATION'
+                : 'LEGACY_MSA_RECOVERY',
+            updatedAt: new Date().toISOString(),
+          },
+          { merge: true },
+        )
+      }
+      const qualifiedDailyAmountCC = Number(
+        dailyData.qualifiedAmountCC || 0,
+      )
+      const leadershipStatus = cleanStringV2(
+        dailyData.leadershipStatus,
+      )
+
+      // Create the missing activity ledger even when today's MSA was already
+      // accrued by an earlier test. This operation is deterministic and does
+      // not modify the member's wallet balance.
+      await ensureMsaDailyWalletLedgerV2({
+        dailyAccrualId,
+        activationEventId:
+          cleanStringV2(dailyData.activationEventId) ||
+          cleanStringV2(result.activationEventId),
+        dailyData,
+      })
+
+      if (
+        qualifiedDailyAmountCC > 0 &&
+        leadershipStatus !== 'COMPLETED'
+      ) {
+        const leadership =
+          await processLeadershipFromQualifiedSourceV2({
+            activationEventId: effectiveActivationEventId,
+            sourceType: 'MSA_DAILY_ACCRUAL',
+            sourceRecordId: dailyAccrualId,
+            sourceEarnerUid: result.beneficiaryUid,
+            sourceEarnerMemberId: result.beneficiaryMemberId,
+            qualifiedAmountCC: qualifiedDailyAmountCC,
+            config,
+          })
+
+        leadershipTotalCC = roundCCV2(
+          leadershipTotalCC + leadership.totalCC,
+        )
+
+        await finalizeMsaDailyLeadershipV2({
+          dailyAccrualId,
+          activationEventId: effectiveActivationEventId,
+          leadershipCount: leadership.count,
+          leadershipTotalCC: leadership.totalCC,
+        })
+      }
+    }
+
+    // Count the semi-monthly transfer, but do not generate Leadership again.
     if (result.msaCreditId && result.creditedCC > 0) {
       credited += 1
-      const leadership = await processLeadershipFromQualifiedSourceV2({
-        activationEventId: result.activationEventId,
-        sourceType: 'MSA_CREDIT',
-        sourceRecordId: result.msaCreditId,
-        sourceEarnerUid: result.beneficiaryUid,
-        sourceEarnerMemberId: result.beneficiaryMemberId,
-        qualifiedAmountCC: result.creditedCC,
-        config,
-      })
-      leadershipTotalCC = roundCCV2(leadershipTotalCC + leadership.totalCC)
-      await finalizeMsaLeadershipV2({
-        msaCreditId: result.msaCreditId,
-        activationEventId: result.activationEventId,
-        leadershipCount: leadership.count,
-        leadershipTotalCC: leadership.totalCC,
-      })
     }
   }
 
   return { processed, credited, leadershipTotalCC }
 }
 
-/** Runs every day at exactly 1:00 PM Asia/Manila. */
+/** Runs every day at exactly 1:00 AM Asia/Manila. */
 export const processMsaCreditsSchedule = onSchedule(
   {
-    schedule: '0 13 * * *',
+    schedule: '0 1 * * *',
     timeZone: 'Asia/Manila',
     region: FUNCTIONS_REGION,
   },
@@ -4700,9 +5162,27 @@ export const processMsaCreditsNow = onCall(
         'Only Admin and Super Admin may run MSA recovery processing.',
       )
     }
-    return {
-      success: true,
-      ...(await processMsaEntitlementsV2(new Date())),
+    try {
+      return {
+        success: true,
+        ...(await processMsaEntitlementsV2(new Date())),
+      }
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unknown MSA processing error.'
+
+      console.error('processMsaCreditsNow failed', {
+        adminUid: request.auth.uid,
+        message,
+        stack: error instanceof Error ? error.stack : null,
+      })
+
+      throw new HttpsError(
+        'internal',
+        `MSA processing failed: ${message}`,
+      )
     }
   },
 )
@@ -4747,5 +5227,2337 @@ export const recordClientAuditEvent = onCall(
         createdAt: timestamp,
       })
     return { success: true, logId }
+  },
+)
+// -----------------------------------------------------------------------------
+// ADMIN DIRECT CC DEPOSIT
+// -----------------------------------------------------------------------------
+
+interface AdminDirectCcDepositRequest {
+  targetUid?: string
+  targetMemberId?: string
+  amountCC: number
+  note?: string
+  idempotencyKey: string
+}
+
+interface AdminDirectCcDepositResult {
+  success: true
+  depositId: string
+  ledgerTransactionId: string
+  targetUid: string
+  targetMemberId: string
+  amountCC: number
+  balanceBeforeCC: number
+  balanceAfterCC: number
+  status: 'Completed'
+  createdAt: string
+  idempotentReplay?: boolean
+}
+
+function adminDirectDepositFingerprint(input: {
+  adminUid: string
+  targetUid: string
+  targetMemberId: string
+  amountCC: number
+  note: string | null
+  idempotencyKey: string
+}): string {
+  return createHash('sha256')
+    .update(JSON.stringify(input))
+    .digest('hex')
+}
+
+export const adminDirectCcDeposit = onCall<AdminDirectCcDepositRequest>(
+  { region: FUNCTIONS_REGION },
+  async (
+    request: CallableRequest<AdminDirectCcDepositRequest>,
+  ): Promise<AdminDirectCcDepositResult> => {
+    if (!request.auth) {
+      throw new HttpsError(
+        'unauthenticated',
+        'Authentication is required.',
+      )
+    }
+
+    const adminUid = request.auth.uid
+    const data = request.data
+
+    if (!data || typeof data !== 'object') {
+      throw new HttpsError(
+        'invalid-argument',
+        'Direct CC deposit data is required.',
+      )
+    }
+
+    const allowedFields = new Set([
+      'targetUid',
+      'targetMemberId',
+      'amountCC',
+      'note',
+      'idempotencyKey',
+    ])
+
+    const unexpectedFields = Object.keys(data).filter(
+      (field) => !allowedFields.has(field),
+    )
+
+    if (unexpectedFields.length > 0) {
+      throw new HttpsError(
+        'invalid-argument',
+        'The deposit request contains unsupported fields.',
+      )
+    }
+
+    const requestedTargetUid = cleanStringV2(data.targetUid)
+    const requestedMemberId = cleanStringV2(
+      data.targetMemberId,
+    ).toUpperCase()
+    const note = cleanStringV2(data.note).slice(0, 300) || null
+    const idempotencyKey = cleanStringV2(data.idempotencyKey)
+
+    if (!requestedTargetUid && !requestedMemberId) {
+      throw new HttpsError(
+        'invalid-argument',
+        'Target UID or target member ID is required.',
+      )
+    }
+
+    if (
+      typeof data.amountCC !== 'number' ||
+      !Number.isFinite(data.amountCC)
+    ) {
+      throw new HttpsError(
+        'invalid-argument',
+        'Deposit amount must be a valid number.',
+      )
+    }
+
+    if (data.amountCC <= 0 || data.amountCC > 1_000_000) {
+      throw new HttpsError(
+        'invalid-argument',
+        'Deposit amount must be greater than 0 and no more than 1,000,000 CC.',
+      )
+    }
+
+    if (!hasSupportedCCPrecision(data.amountCC)) {
+      throw new HttpsError(
+        'invalid-argument',
+        'Deposit amount exceeds the supported precision of four decimal places.',
+      )
+    }
+
+    if (idempotencyKey.length < 16 || idempotencyKey.length > 180) {
+      throw new HttpsError(
+        'invalid-argument',
+        'A valid idempotency key is required.',
+      )
+    }
+
+    const amountCC = roundCCV2(data.amountCC)
+
+    try {
+      const adminSnap = await db.collection('users').doc(adminUid).get()
+    if (!adminSnap.exists) {
+      throw new HttpsError(
+        'permission-denied',
+        'Administrator profile was not found.',
+      )
+    }
+
+    const adminData = adminSnap.data() || {}
+    const adminRole = cleanStringV2(adminData.role)
+    const adminPermissions =
+      adminData.permissions &&
+      typeof adminData.permissions === 'object'
+        ? (adminData.permissions as Record<string, unknown>)
+        : {}
+
+    const isSuperAdmin = adminRole === 'Super Admin'
+    const isAuthorizedAdmin =
+      adminRole === 'Admin' &&
+      adminPermissions.manageWallets === true
+
+    if (!isSuperAdmin && !isAuthorizedAdmin) {
+      throw new HttpsError(
+        'permission-denied',
+        'Only an authorized Admin or Super Admin may deposit Chosen Credits.',
+      )
+    }
+
+    let targetUid = requestedTargetUid
+    let resolvedTargetSnapshot:
+      | FirebaseFirestore.DocumentSnapshot<DocumentData>
+      | null = null
+
+    if (targetUid) {
+      resolvedTargetSnapshot = await db
+        .collection('users')
+        .doc(targetUid)
+        .get()
+    } else {
+      const memberQuery = await db
+        .collection('users')
+        .where('memberId', '==', requestedMemberId)
+        .limit(2)
+        .get()
+
+      if (memberQuery.size > 1) {
+        throw new HttpsError(
+          'failed-precondition',
+          'The member ID cannot be resolved safely.',
+        )
+      }
+
+      if (!memberQuery.empty) {
+        resolvedTargetSnapshot = memberQuery.docs[0]
+        targetUid = memberQuery.docs[0].id
+      }
+    }
+
+    if (!resolvedTargetSnapshot?.exists || !targetUid) {
+      throw new HttpsError(
+        'not-found',
+        'The target member account was not found.',
+      )
+    }
+
+    const resolvedTargetData = resolvedTargetSnapshot.data() || {}
+    const targetMemberId = cleanStringV2(
+      resolvedTargetData.memberId,
+    ).toUpperCase()
+
+    if (
+      requestedMemberId &&
+      targetMemberId &&
+      requestedMemberId !== targetMemberId
+    ) {
+      throw new HttpsError(
+        'failed-precondition',
+        'The target member identity changed before the deposit could be processed.',
+      )
+    }
+
+    const targetAccountType = cleanStringV2(
+      resolvedTargetData.accountType,
+    ).toLowerCase()
+
+    if (
+      targetAccountType === 'system' ||
+      targetAccountType === 'admin'
+    ) {
+      throw new HttpsError(
+        'failed-precondition',
+        'Direct member deposits cannot target a system or administrator account.',
+      )
+    }
+
+    if (resolvedTargetData.walletEnabled === false) {
+      throw new HttpsError(
+        'failed-precondition',
+        'The target member wallet is disabled.',
+      )
+    }
+
+    const fingerprint = adminDirectDepositFingerprint({
+      adminUid,
+      targetUid,
+      targetMemberId,
+      amountCC,
+      note,
+      idempotencyKey,
+    })
+
+    const idempotencyDocumentId = deterministicFinancialIdV2(
+      'ADMIN-DEP-IDEMP',
+      `admin-direct-cc-deposit:${adminUid}:${idempotencyKey}`,
+    )
+    const depositId = deterministicFinancialIdV2(
+      'ADMIN-CC-DEP',
+      `admin-direct-cc-deposit:${adminUid}:${idempotencyKey}`,
+    )
+    const ledgerTransactionId = deterministicFinancialIdV2(
+      'TX-ADMIN-DEP',
+      `${depositId}:wallet-credit`,
+    )
+    const memberNotificationId = deterministicFinancialIdV2(
+      'NOTIF-ADMIN-DEP-MEMBER',
+      `${depositId}:member-notification`,
+    )
+    const adminNotificationId = deterministicFinancialIdV2(
+      'NOTIF-ADMIN-DEP-ACTOR',
+      `${depositId}:admin-notification`,
+    )
+    const auditLogId = deterministicFinancialIdV2(
+      'LOG-ADMIN-DEP',
+      `${depositId}:audit`,
+    )
+
+    const result = await db.runTransaction(
+      async (transaction: Transaction): Promise<AdminDirectCcDepositResult> => {
+        const idempotencyRef = db
+          .collection('processed_idempotencies')
+          .doc(idempotencyDocumentId)
+        const targetUserRef = db.collection('users').doc(targetUid)
+        const walletRef = db.collection('wallets').doc(targetUid)
+
+        const idempotencySnap = await transaction.get(idempotencyRef)
+        const targetUserSnap = await transaction.get(targetUserRef)
+        const walletSnap = await transaction.get(walletRef)
+
+        if (idempotencySnap.exists) {
+          const existing = idempotencySnap.data() || {}
+
+          if (cleanStringV2(existing.requestFingerprint) !== fingerprint) {
+            throw new Error('IDEMPOTENCY_KEY_CONFLICT')
+          }
+
+          const existingResult =
+            existing.result as AdminDirectCcDepositResult | undefined
+
+          if (existingResult) {
+            return {
+              ...existingResult,
+              idempotentReplay: true,
+            }
+          }
+        }
+
+        if (!targetUserSnap.exists) {
+          throw new Error('TARGET_MEMBER_NOT_FOUND')
+        }
+
+        const targetUserData = targetUserSnap.data() || {}
+        const canonicalTargetMemberId = cleanStringV2(
+          targetUserData.memberId,
+        ).toUpperCase()
+
+        if (
+          targetMemberId &&
+          canonicalTargetMemberId !== targetMemberId
+        ) {
+          throw new Error('TARGET_IDENTITY_CHANGED')
+        }
+
+        const timestamp = new Date().toISOString()
+        const walletData = walletSnap.exists ? walletSnap.data() || {} : {}
+        const balanceBeforeCC = walletSnap.exists
+          ? Number(walletData.chosenWalletBalance ?? 0)
+          : 0
+
+        if (
+          !Number.isFinite(balanceBeforeCC) ||
+          balanceBeforeCC < 0
+        ) {
+          throw new Error('INVALID_TARGET_WALLET_BALANCE')
+        }
+
+        const balanceAfterCC = roundCCV2(
+          balanceBeforeCC + amountCC,
+        )
+
+        if (walletSnap.exists) {
+          transaction.update(walletRef, {
+            chosenWalletBalance: balanceAfterCC,
+            cashWalletStatus: 'Active',
+            walletVersion: Number(walletData.walletVersion || 0) + 1,
+            updatedAt: timestamp,
+          })
+        } else {
+          transaction.set(walletRef, {
+            uid: targetUid,
+            chosenWalletBalance: balanceAfterCC,
+            commissionWalletBalance: 0,
+            marketingSupportWalletBalance: 0,
+            rewardWalletBalance: 0,
+            cashWalletBalance: 0,
+            cashWalletStatus: 'Active',
+            walletVersion: 1,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          })
+        }
+
+        transaction.set(
+          db.collection('wallet_transactions').doc(ledgerTransactionId),
+          {
+            id: ledgerTransactionId,
+            transactionId: ledgerTransactionId,
+            depositId,
+            uid: targetUid,
+            memberId: canonicalTargetMemberId,
+            amount: amountCC,
+            amountCC,
+            type: 'CREDIT',
+            direction: 'Credit',
+            walletType: 'Chosen Wallet',
+            transactionType: 'ADMIN_DIRECT_CC_DEPOSIT',
+            sourceType: 'ADMIN_DIRECT_CC_DEPOSIT',
+            depositType: 'DIRECT_ADMIN_DEPOSIT',
+            publicLabel: 'Direct CC Deposit',
+            balanceBefore: balanceBeforeCC,
+            balanceAfter: balanceAfterCC,
+            adminUid,
+            adminName: cleanStringV2(adminData.fullName) || 'Administrator',
+            note,
+            referenceNumber: depositId,
+            idempotencyKey: `${idempotencyKey}:ledger`,
+            status: 'Completed',
+            createdAt: timestamp,
+            completedAt: timestamp,
+            timestamp,
+            description: note
+              ? `Direct CC Deposit from Administration: ${note}`
+              : 'Direct CC Deposit from Administration',
+          },
+        )
+
+        const memberMessage =
+          `${amountCC.toFixed(4)} CC was deposited directly to your Chosen Wallet by I AM CHOSEN Administration.`
+
+        transaction.set(
+          db.collection('notifications').doc(memberNotificationId),
+          {
+            id: memberNotificationId,
+            notificationId: memberNotificationId,
+            uid: targetUid,
+            title: 'Direct CC Deposit Received',
+            message: memberMessage,
+            desc: memberMessage,
+            date: timestamp,
+            type: 'Deposit',
+            category: 'WALLET',
+            amountCC,
+            unread: true,
+            isRead: false,
+            targetView: 'deposits',
+            actionUrl: null,
+            sourceId: depositId,
+            sourceType: 'ADMIN_DIRECT_CC_DEPOSIT',
+            sourceMemberId: canonicalTargetMemberId || null,
+            sourceTransactionId: ledgerTransactionId,
+            createdAt: timestamp,
+            readAt: null,
+          },
+        )
+
+        const targetLabel =
+          cleanStringV2(targetUserData.fullName) ||
+          canonicalTargetMemberId ||
+          targetUid
+
+        const adminMessage =
+          `You deposited ${amountCC.toFixed(4)} CC directly to ${targetLabel}. Reference: ${depositId}.`
+
+        transaction.set(
+          db.collection('notifications').doc(adminNotificationId),
+          {
+            id: adminNotificationId,
+            notificationId: adminNotificationId,
+            uid: adminUid,
+            title: 'Direct CC Deposit Completed',
+            message: adminMessage,
+            desc: adminMessage,
+            date: timestamp,
+            type: 'Success',
+            category: 'ADMIN_WALLET',
+            amountCC,
+            unread: true,
+            isRead: false,
+            targetView: 'wallet-management',
+            actionUrl: null,
+            sourceId: depositId,
+            sourceType: 'ADMIN_DIRECT_CC_DEPOSIT',
+            targetUid,
+            targetMemberId: canonicalTargetMemberId || null,
+            sourceTransactionId: ledgerTransactionId,
+            createdAt: timestamp,
+            readAt: null,
+          },
+        )
+
+        transaction.set(
+          db.collection('audit_logs').doc(auditLogId),
+          {
+            id: auditLogId,
+            actorUid: adminUid,
+            actorEmail: cleanStringV2(adminData.email),
+            actorRole: adminRole,
+            action: 'ADMIN_DIRECT_CC_DEPOSIT_COMPLETED',
+            targetCollection: 'wallets',
+            targetId: targetUid,
+            details:
+              `Deposited ${amountCC} CC directly to ${targetLabel}. ` +
+              `Balance: ${balanceBeforeCC} CC -> ${balanceAfterCC} CC. ` +
+              `Reference: ${depositId}.`,
+            metadata: {
+              depositId,
+              ledgerTransactionId,
+              targetUid,
+              targetMemberId: canonicalTargetMemberId,
+              amountCC,
+              balanceBeforeCC,
+              balanceAfterCC,
+              note,
+              idempotencyKey,
+            },
+            authoritativeFinancialEvent: true,
+            timestamp,
+            createdAt: timestamp,
+          },
+        )
+
+        const resultPayload: AdminDirectCcDepositResult = {
+          success: true,
+          depositId,
+          ledgerTransactionId,
+          targetUid,
+          targetMemberId: canonicalTargetMemberId,
+          amountCC,
+          balanceBeforeCC,
+          balanceAfterCC,
+          status: 'Completed',
+          createdAt: timestamp,
+        }
+
+        transaction.set(idempotencyRef, {
+          id: idempotencyDocumentId,
+          operation: 'ADMIN_DIRECT_CC_DEPOSIT',
+          adminUid,
+          targetUid,
+          targetMemberId: canonicalTargetMemberId,
+          requestFingerprint: fingerprint,
+          clientIdempotencyKey: idempotencyKey,
+          status: 'COMPLETED',
+          result: resultPayload,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          completedAt: timestamp,
+        })
+
+        return resultPayload
+      },
+    )
+
+      return result
+    } catch (error: unknown) {
+      if (error instanceof HttpsError) {
+        throw error
+      }
+
+      const errorMessage =
+        error instanceof Error ? error.message : String(error)
+      const errorId = deterministicFinancialIdV2(
+        'ERR-ADMIN-DEP',
+        `${adminUid}:${idempotencyKey}:${Date.now()}:${errorMessage}`,
+      )
+
+      console.error('adminDirectCcDeposit failed', {
+        errorId,
+        adminUid,
+        requestedTargetUid,
+        requestedMemberId,
+        amountCC,
+        errorMessage,
+        stack: error instanceof Error ? error.stack : null,
+      })
+
+      switch (errorMessage) {
+        case 'IDEMPOTENCY_KEY_CONFLICT':
+          throw new HttpsError(
+            'already-exists',
+            'This deposit request key was already used for a different operation.',
+            { errorId },
+          )
+
+        case 'TARGET_MEMBER_NOT_FOUND':
+          throw new HttpsError(
+            'not-found',
+            'The receiving member account could not be found.',
+            { errorId },
+          )
+
+        case 'TARGET_IDENTITY_CHANGED':
+          throw new HttpsError(
+            'failed-precondition',
+            'The receiving member identity changed before settlement. Refresh the member list and try again.',
+            { errorId },
+          )
+
+        case 'INVALID_TARGET_WALLET_BALANCE':
+          throw new HttpsError(
+            'failed-precondition',
+            'The receiving member wallet balance requires administrative review before a deposit can be completed.',
+            { errorId },
+          )
+
+        default:
+          throw new HttpsError(
+            'internal',
+            'The Direct CC Deposit could not be completed. No credits were deposited.',
+            {
+              errorId,
+              operation: 'ADMIN_DIRECT_CC_DEPOSIT',
+            },
+          )
+      }
+    }
+  },
+)
+
+// -----------------------------------------------------------------------------
+// SERVER-AUTHORED NETWORK SUMMARY V5
+// -----------------------------------------------------------------------------
+
+interface DashboardNetworkSummaryV4 {
+  uid: string
+  directPartnerCount: number
+  directPartners: number
+  totalNetworkCount: number
+  totalNetworkMembers: number
+  personalProductVolumeCC: number
+  personalPackageVolumeCC: number
+  groupProductVolumeCC: number
+  groupPackageVolumeCC: number
+  directReferralBonusCC: number
+  indirectReferralBonusCC: number
+  unilevelBonusCC: number
+  leadershipBonusCC: number
+  infinityBonusCC: number
+  retailProfitCC: number
+  leadershipRewardCC: number
+  marketingSupportAllocationCC: number
+  totalCommissionIncomeCC: number
+  schemaVersion: 5
+  calculationSource: 'SERVER_AUTHORITATIVE'
+  generatedAt: string
+  updatedAt: string
+}
+
+interface DashboardCommissionIncomeTotalsV4 {
+  directReferralBonusCC: number
+  indirectReferralBonusCC: number
+  unilevelBonusCC: number
+  leadershipBonusCC: number
+  infinityBonusCC: number
+  retailProfitCC: number
+  leadershipRewardCC: number
+  marketingSupportAllocationCC: number
+  totalCommissionIncomeCC: number
+}
+
+interface DownlineNodeV3 {
+  uid: string
+  data: DocumentData
+  level: number
+}
+
+interface VolumeAggregationV3 {
+  totalsByUid: Map<string, number>
+  ownersWithRecords: Set<string>
+}
+
+interface WalletVolumeAggregationV3 {
+  productTotalsByUid: Map<string, number>
+  packageTotalsByUid: Map<string, number>
+  productOwnersWithRecords: Set<string>
+  packageOwnersWithRecords: Set<string>
+}
+
+function normalizeDashboardTokenV3(value: unknown): string {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, '')
+}
+
+function positiveFiniteNumberV3(...values: unknown[]): number {
+  for (const value of values) {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed
+    }
+  }
+
+  return 0
+}
+
+function dashboardRecordV3(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object'
+    ? (value as Record<string, unknown>)
+    : {}
+}
+
+function isActiveNetworkPartnerV3(data: DocumentData): boolean {
+  const status = normalizeDashboardTokenV3(
+    data.status || data.accountStatus,
+  )
+  if (status !== 'active') return false
+
+  const accountType = normalizeDashboardTokenV3(data.accountType)
+  const role = normalizeDashboardTokenV3(data.role)
+
+  return (
+    accountType === 'affiliate' ||
+    accountType === 'smartcustomer' ||
+    role === 'affiliate' ||
+    role === 'citydistributor' ||
+    role === 'regionaldistributor'
+  )
+}
+
+function chunkValuesV3(values: string[], size = 30): string[][] {
+  const chunks: string[][] = []
+
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size))
+  }
+
+  return chunks
+}
+
+async function queryCollectionByValuesV3(input: {
+  collectionName: string
+  fieldName: string
+  values: string[]
+}): Promise<FirebaseFirestore.QueryDocumentSnapshot[]> {
+  const uniqueValues = [...new Set(input.values.filter(Boolean))]
+  if (uniqueValues.length === 0) return []
+
+  const documents = new Map<string, FirebaseFirestore.QueryDocumentSnapshot>()
+
+  for (const valueChunk of chunkValuesV3(uniqueValues)) {
+    const queryRef =
+      valueChunk.length === 1
+        ? db
+            .collection(input.collectionName)
+            .where(input.fieldName, '==', valueChunk[0])
+        : db
+            .collection(input.collectionName)
+            .where(input.fieldName, 'in', valueChunk)
+
+    const snapshot = await queryRef.get()
+
+    snapshot.docs.forEach((documentSnapshot) => {
+      documents.set(documentSnapshot.id, documentSnapshot)
+    })
+  }
+
+  return [...documents.values()]
+}
+
+async function loadChildrenForParentsV3(
+  parents: Array<{ uid: string; data: DocumentData }>,
+): Promise<FirebaseFirestore.QueryDocumentSnapshot[]> {
+  if (parents.length === 0) return []
+
+  const parentUids = parents.map((parent) => parent.uid)
+  const referenceValues = parents.flatMap((parent) => [
+    parent.uid,
+    cleanStringV2(parent.data.sponsorCode),
+    cleanStringV2(parent.data.memberId),
+  ])
+
+  const uidFields = ['sponsorUid', 'referrerUid', 'sponsorId', 'parentUid']
+  const referenceFields = ['referredBy', 'referralCode', 'sponsorCodeUsed']
+  const children = new Map<string, FirebaseFirestore.QueryDocumentSnapshot>()
+
+  for (const fieldName of uidFields) {
+    const documents = await queryCollectionByValuesV3({
+      collectionName: 'users',
+      fieldName,
+      values: parentUids,
+    })
+
+    documents.forEach((documentSnapshot) => {
+      children.set(documentSnapshot.id, documentSnapshot)
+    })
+  }
+
+  for (const fieldName of referenceFields) {
+    const documents = await queryCollectionByValuesV3({
+      collectionName: 'users',
+      fieldName,
+      values: referenceValues,
+    })
+
+    documents.forEach((documentSnapshot) => {
+      children.set(documentSnapshot.id, documentSnapshot)
+    })
+  }
+
+  return [...children.values()]
+}
+
+async function buildCompleteDownlineV3(
+  rootUid: string,
+  rootData: DocumentData,
+): Promise<DownlineNodeV3[]> {
+  const descendants: DownlineNodeV3[] = []
+  const seen = new Set<string>([rootUid])
+  let frontier: Array<{ uid: string; data: DocumentData }> = [
+    { uid: rootUid, data: rootData },
+  ]
+  let level = 1
+
+  while (frontier.length > 0) {
+    const childDocuments = await loadChildrenForParentsV3(frontier)
+    const nextFrontier: Array<{ uid: string; data: DocumentData }> = []
+
+    for (const childDocument of childDocuments) {
+      if (seen.has(childDocument.id)) continue
+
+      seen.add(childDocument.id)
+      const childData = childDocument.data() || {}
+
+      descendants.push({
+        uid: childDocument.id,
+        data: childData,
+        level,
+      })
+
+      nextFrontier.push({
+        uid: childDocument.id,
+        data: childData,
+      })
+
+      if (descendants.length > 100000) {
+        throw new Error('NETWORK_SUMMARY_MAXIMUM_SIZE_EXCEEDED')
+      }
+    }
+
+    frontier = nextFrontier
+    level += 1
+
+    if (level > 1000) {
+      throw new Error('NETWORK_SUMMARY_GENEALOGY_DEPTH_EXCEEDED')
+    }
+  }
+
+  return descendants
+}
+
+async function queryOwnedDocumentsV3(
+  collectionName: string,
+  ownerUids: string[],
+  ownerFields: string[],
+): Promise<FirebaseFirestore.QueryDocumentSnapshot[]> {
+  const documents = new Map<string, FirebaseFirestore.QueryDocumentSnapshot>()
+
+  for (const fieldName of ownerFields) {
+    const matches = await queryCollectionByValuesV3({
+      collectionName,
+      fieldName,
+      values: ownerUids,
+    })
+
+    matches.forEach((documentSnapshot) => {
+      documents.set(documentSnapshot.id, documentSnapshot)
+    })
+  }
+
+  return [...documents.values()]
+}
+
+function ownerUidFromRecordV3(data: DocumentData): string {
+  return cleanStringV2(
+    data.uid ||
+      data.userUid ||
+      data.userId ||
+      data.customerUid ||
+      data.memberUid ||
+      data.buyerUid ||
+      data.purchaserUid ||
+      data.ownerUid,
+  )
+}
+
+function hasRejectedBusinessStatusV3(data: DocumentData): boolean {
+  const status = normalizeDashboardTokenV3(
+    data.status || data.orderStatus || data.transactionStatus,
+  )
+
+  return (
+    status === 'cancelled' ||
+    status === 'canceled' ||
+    status === 'rejected' ||
+    status === 'failed' ||
+    status === 'refunded' ||
+    status === 'voided'
+  )
+}
+
+function isCompletedProductOrderV3(data: DocumentData): boolean {
+  if (hasRejectedBusinessStatusV3(data)) return false
+
+  const status = normalizeDashboardTokenV3(
+    data.status || data.orderStatus || data.fulfillmentStatus,
+  )
+  const paymentStatus = normalizeDashboardTokenV3(
+    data.paymentStatus || data.paymentState,
+  )
+
+  const completedStatuses = new Set([
+    'completed',
+    'delivered',
+    'fulfilled',
+    'settled',
+    'paid',
+    'paymentconfirmed',
+  ])
+
+  return completedStatuses.has(status) || completedStatuses.has(paymentStatus)
+}
+
+function productVolumeFromOrderV3(data: DocumentData): number {
+  const directVolume = positiveFiniteNumberV3(
+    data.totalProductVolumeCC,
+    data.productVolumeCC,
+    data.totalVolumeCC,
+    data.volumeCC,
+    data.totalPV,
+    data.pv,
+    data.totalAmountCC,
+    data.totalCC,
+    data.amountCC,
+    data.subtotalCC,
+  )
+
+  if (directVolume > 0) {
+    return roundCCV2(directVolume)
+  }
+
+  const rawItems =
+    data.items || data.orderItems || data.lineItems || data.products
+  if (!Array.isArray(rawItems)) return 0
+
+  const itemTotal = rawItems.reduce((total, rawItem) => {
+    const item = dashboardRecordV3(rawItem)
+    const quantity = Math.max(
+      1,
+      Math.trunc(positiveFiniteNumberV3(item.quantity, item.qty, 1)),
+    )
+
+    const explicitItemVolume = positiveFiniteNumberV3(
+      item.totalProductVolumeCC,
+      item.productVolumeCC,
+      item.totalVolumeCC,
+      item.volumeCC,
+      item.totalPV,
+      item.pv,
+      item.totalCC,
+      item.amountCC,
+    )
+
+    if (explicitItemVolume > 0) {
+      return total + explicitItemVolume
+    }
+
+    const unitVolume = positiveFiniteNumberV3(
+      item.unitProductVolumeCC,
+      item.unitVolumeCC,
+      item.unitPV,
+      item.priceCC,
+      item.unitPriceCC,
+    )
+
+    return total + unitVolume * quantity
+  }, 0)
+
+  return roundCCV2(itemTotal)
+}
+
+async function loadProductOrderVolumesV3(
+  ownerUids: string[],
+): Promise<VolumeAggregationV3> {
+  const totalsByUid = new Map<string, number>()
+  const ownersWithRecords = new Set<string>()
+
+  if (ownerUids.length === 0) {
+    return { totalsByUid, ownersWithRecords }
+  }
+
+  const ownerUidSet = new Set(ownerUids)
+
+  const orderDocuments = await queryOwnedDocumentsV3('orders', ownerUids, [
+    'uid',
+    'userUid',
+    'userId',
+    'customerUid',
+    'memberUid',
+    'buyerUid',
+    'purchaserUid',
+    'ownerUid',
+  ])
+
+  for (const orderDocument of orderDocuments) {
+    const orderData = orderDocument.data() || {}
+    if (!isCompletedProductOrderV3(orderData)) continue
+
+    const ownerUid = ownerUidFromRecordV3(orderData)
+    if (!ownerUid || !ownerUidSet.has(ownerUid)) continue
+
+    ownersWithRecords.add(ownerUid)
+    totalsByUid.set(
+      ownerUid,
+      roundCCV2(
+        Number(totalsByUid.get(ownerUid) || 0) +
+          productVolumeFromOrderV3(orderData),
+      ),
+    )
+  }
+
+  return { totalsByUid, ownersWithRecords }
+}
+
+function packageVolumeFromRecordV3(data: DocumentData): number {
+  return roundCCV2(
+    positiveFiniteNumberV3(
+      data.priceCC,
+      data.packageValueCC,
+      data.walletDebitedCC,
+      data.amountCC,
+      data.amount,
+    ),
+  )
+}
+
+async function loadPackagePurchaseVolumesV3(
+  ownerUids: string[],
+): Promise<VolumeAggregationV3> {
+  const totalsByUid = new Map<string, number>()
+  const ownersWithRecords = new Set<string>()
+  const eventAmountsByUid = new Map<string, Map<string, number>>()
+
+  if (ownerUids.length === 0) {
+    return { totalsByUid, ownersWithRecords }
+  }
+
+  const ownerUidSet = new Set(ownerUids)
+
+  const collectionNames = [
+    'package_activation_events',
+    'package_history',
+    'package_compensation_events',
+  ]
+
+  for (const collectionName of collectionNames) {
+    const packageDocuments = await queryOwnedDocumentsV3(
+      collectionName,
+      ownerUids,
+      ['uid', 'userUid', 'memberUid', 'ownerUid'],
+    )
+
+    for (const packageDocument of packageDocuments) {
+      const packageData = packageDocument.data() || {}
+      if (hasRejectedBusinessStatusV3(packageData)) continue
+
+      const ownerUid = ownerUidFromRecordV3(packageData)
+      if (!ownerUid || !ownerUidSet.has(ownerUid)) continue
+
+      const amountCC = packageVolumeFromRecordV3(packageData)
+      if (amountCC <= 0) continue
+
+      const sourceKey =
+        cleanStringV2(
+          packageData.activationEventId ||
+            packageData.packageActivationEventId ||
+            packageData.paymentTransactionId ||
+            packageData.packageTransactionId ||
+            packageData.walletTransactionId ||
+            packageData.idempotencyKey,
+        ) || `${collectionName}:${packageDocument.id}`
+
+      ownersWithRecords.add(ownerUid)
+
+      const ownerEvents =
+        eventAmountsByUid.get(ownerUid) || new Map<string, number>()
+
+      ownerEvents.set(
+        sourceKey,
+        Math.max(Number(ownerEvents.get(sourceKey) || 0), amountCC),
+      )
+
+      eventAmountsByUid.set(ownerUid, ownerEvents)
+    }
+  }
+
+  eventAmountsByUid.forEach((eventAmounts, ownerUid) => {
+    totalsByUid.set(
+      ownerUid,
+      roundCCV2(
+        [...eventAmounts.values()].reduce(
+          (total, amountCC) => total + amountCC,
+          0,
+        ),
+      ),
+    )
+  })
+
+  return { totalsByUid, ownersWithRecords }
+}
+
+function isCompletedWalletLedgerV3(data: DocumentData): boolean {
+  if (hasRejectedBusinessStatusV3(data)) return false
+
+  const status = normalizeDashboardTokenV3(
+    data.status || data.ledgerStatus || data.transactionStatus,
+  )
+
+  return (
+    !status ||
+    status === 'completed' ||
+    status === 'credited' ||
+    status === 'settled' ||
+    status === 'posted' ||
+    status === 'approved' ||
+    status === 'successful' ||
+    status === 'succeeded'
+  )
+}
+
+async function loadWalletPurchaseVolumesV3(
+  ownerUids: string[],
+): Promise<WalletVolumeAggregationV3> {
+  const productTotalsByUid = new Map<string, number>()
+  const packageTotalsByUid = new Map<string, number>()
+  const productOwnersWithRecords = new Set<string>()
+  const packageOwnersWithRecords = new Set<string>()
+
+  if (ownerUids.length === 0) {
+    return {
+      productTotalsByUid,
+      packageTotalsByUid,
+      productOwnersWithRecords,
+      packageOwnersWithRecords,
+    }
+  }
+
+  const ownerUidSet = new Set(ownerUids)
+
+  const ledgerDocuments = await queryOwnedDocumentsV3(
+    'wallet_transactions',
+    ownerUids,
+    ['uid', 'userUid', 'ownerUid'],
+  )
+
+  for (const ledgerDocument of ledgerDocuments) {
+    const ledgerData = ledgerDocument.data() || {}
+    if (!isCompletedWalletLedgerV3(ledgerData)) continue
+
+    const ownerUid = ownerUidFromRecordV3(ledgerData)
+    if (!ownerUid || !ownerUidSet.has(ownerUid)) continue
+
+    const transactionType = normalizeDashboardTokenV3(
+      ledgerData.transactionType || ledgerData.ledgerType || ledgerData.type,
+    )
+    const direction = normalizeDashboardTokenV3(
+      ledgerData.direction || ledgerData.entryType,
+    )
+    const debitLike =
+      !direction ||
+      direction === 'debit' ||
+      direction === 'out' ||
+      direction === 'outgoing'
+
+    if (!debitLike) continue
+
+    const amountCC = roundCCV2(
+      positiveFiniteNumberV3(
+        ledgerData.packageValueCC,
+        ledgerData.productVolumeCC,
+        ledgerData.totalVolumeCC,
+        ledgerData.amountCC,
+        ledgerData.amount,
+        ledgerData.debitAmountCC,
+        ledgerData.totalCC,
+      ),
+    )
+
+    if (amountCC <= 0) continue
+
+    const isPackagePurchase =
+      transactionType === 'packagepurchasedebit' ||
+      transactionType === 'packageactivationdebit' ||
+      transactionType === 'packageupgradedebit' ||
+      transactionType === 'packagereactivationdebit' ||
+      (transactionType.includes('package') &&
+        (transactionType.includes('purchase') ||
+          transactionType.includes('activation') ||
+          transactionType.includes('upgrade') ||
+          transactionType.includes('reactivation')))
+
+    if (isPackagePurchase) {
+      packageOwnersWithRecords.add(ownerUid)
+      packageTotalsByUid.set(
+        ownerUid,
+        roundCCV2(Number(packageTotalsByUid.get(ownerUid) || 0) + amountCC),
+      )
+      continue
+    }
+
+    const isProductPurchase =
+      transactionType === 'productpurchasedebit' ||
+      transactionType === 'productorderdebit' ||
+      transactionType === 'ecommerceorderdebit' ||
+      transactionType === 'orderpurchasedebit' ||
+      (transactionType.includes('product') &&
+        (transactionType.includes('purchase') ||
+          transactionType.includes('order')))
+
+    if (isProductPurchase) {
+      productOwnersWithRecords.add(ownerUid)
+      productTotalsByUid.set(
+        ownerUid,
+        roundCCV2(Number(productTotalsByUid.get(ownerUid) || 0) + amountCC),
+      )
+    }
+  }
+
+  return {
+    productTotalsByUid,
+    packageTotalsByUid,
+    productOwnersWithRecords,
+    packageOwnersWithRecords,
+  }
+}
+
+async function calculateCommissionIncomeTotalsV5(
+  earnerUid: string,
+): Promise<DashboardCommissionIncomeTotalsV4> {
+  type IncomeCategoryV5 =
+    | 'directReferralBonusCC'
+    | 'indirectReferralBonusCC'
+    | 'unilevelBonusCC'
+    | 'leadershipBonusCC'
+    | 'infinityBonusCC'
+    | 'retailProfitCC'
+    | 'leadershipRewardCC'
+    | 'marketingSupportAllocationCC'
+
+  interface IncomeRecordV5 {
+    collectionName: string
+    documentId: string
+    data: DocumentData
+  }
+
+  const loadMemberRecords = async (
+    collectionName: string,
+    identityFields: string[],
+  ): Promise<IncomeRecordV5[]> => {
+    const queryResults = await Promise.allSettled(
+      identityFields.map((field) =>
+        db.collection(collectionName).where(field, '==', earnerUid).get(),
+      ),
+    )
+
+    const uniqueRecords = new Map<string, IncomeRecordV5>()
+
+    queryResults.forEach((result) => {
+      if (result.status !== 'fulfilled') return
+
+      result.value.docs.forEach((documentSnapshot) => {
+        uniqueRecords.set(documentSnapshot.id, {
+          collectionName,
+          documentId: documentSnapshot.id,
+          data: documentSnapshot.data() || {},
+        })
+      })
+    })
+
+    return [...uniqueRecords.values()]
+  }
+
+  const [
+    commissionRecords,
+    walletRecords,
+    msaDailyRecords,
+    retailProfitRecords,
+    leadershipRewardRecords,
+  ] = await Promise.all([
+    loadMemberRecords('commissions', [
+      'earnerUid',
+      'uid',
+      'beneficiaryUid',
+      'userUid',
+    ]),
+    loadMemberRecords('wallet_transactions', ['uid', 'earnerUid']),
+    loadMemberRecords('msa_daily_accruals', ['uid', 'beneficiaryUid']),
+    loadMemberRecords('retail_profits', ['uid', 'earnerUid', 'beneficiaryUid']),
+    loadMemberRecords('leadership_rewards', [
+      'uid',
+      'earnerUid',
+      'beneficiaryUid',
+    ]),
+  ])
+
+  const creditedByKey = new Map<
+    string,
+    {
+      category: IncomeCategoryV5
+      amountCC: number
+      priority: number
+    }
+  >()
+
+  const validCreditedStatuses = new Set([
+    'credited',
+    'completed',
+    'success',
+    'successful',
+    'succeeded',
+    'settled',
+    'posted',
+    'approved',
+    'paid',
+    'released',
+    'accrued',
+    'partiallyaccrued',
+  ])
+
+  const rejectedStatuses = new Set([
+    'pending',
+    'processing',
+    'notqualified',
+    'flushed',
+    'rejected',
+    'cancelled',
+    'canceled',
+    'failed',
+    'reversed',
+    'void',
+    'zero',
+  ])
+
+  const recordStatusIsCredited = (
+    record: IncomeRecordV5,
+  ): boolean => {
+    const data = record.data
+    const status = normalizeDashboardTokenV3(
+      data.status ||
+        data.ledgerStatus ||
+        data.paymentStatus ||
+        data.commissionStatus ||
+        data.rewardStatus,
+    )
+
+    if (rejectedStatuses.has(status)) return false
+    if (validCreditedStatuses.has(status)) return true
+
+    // Canonical records should have a credited status. Older immutable wallet
+    // and MSA ledgers may omit it but still contain a positive completed amount.
+    return (
+      !status &&
+      (record.collectionName === 'wallet_transactions' ||
+        record.collectionName === 'msa_daily_accruals')
+    )
+  }
+
+  const recordTokens = (data: DocumentData): string[] => {
+    const metadata = dashboardRecordV3(data.metadata)
+
+    return [
+      data.commissionType,
+      data.incomeType,
+      data.incomeLabel,
+      data.bonusType,
+      data.earningType,
+      data.transactionType,
+      data.sourceType,
+      data.category,
+      data.type,
+      data.description,
+      metadata.commissionType,
+      metadata.incomeType,
+      metadata.incomeLabel,
+      metadata.bonusType,
+      metadata.earningType,
+      metadata.transactionType,
+      metadata.sourceType,
+      metadata.category,
+      metadata.type,
+    ]
+      .map(normalizeDashboardTokenV3)
+      .filter(Boolean)
+  }
+
+  const classifyIncome = (
+    record: IncomeRecordV5,
+  ): IncomeCategoryV5 | null => {
+    const data = record.data
+    const metadata = dashboardRecordV3(data.metadata)
+    const tokens = recordTokens(data)
+    const includes = (fragment: string): boolean =>
+      tokens.some((token) => token.includes(fragment))
+
+    if (record.collectionName === 'msa_daily_accruals') {
+      return 'marketingSupportAllocationCC'
+    }
+
+    if (record.collectionName === 'retail_profits') {
+      return 'retailProfitCC'
+    }
+
+    if (record.collectionName === 'leadership_rewards') {
+      return 'leadershipRewardCC'
+    }
+
+    // Leadership Reward must be checked before Leadership Bonus.
+    if (includes('leadershipreward')) {
+      return 'leadershipRewardCC'
+    }
+
+    if (
+      includes('leadershipbonus') ||
+      includes('directleadership') ||
+      includes('indirectleadership') ||
+      includes('msaleadership') ||
+      includes('leadershipincome')
+    ) {
+      return 'leadershipBonusCC'
+    }
+
+    if (
+      includes('indirectreferralbonus') ||
+      includes('indirectreferral')
+    ) {
+      return 'indirectReferralBonusCC'
+    }
+
+    if (
+      includes('directreferralbonus') ||
+      includes('directreferral')
+    ) {
+      return 'directReferralBonusCC'
+    }
+
+    if (includes('referralbonus')) {
+      const referralType = normalizeDashboardTokenV3(
+        data.referralBonusType ||
+          data.referralType ||
+          metadata.referralBonusType ||
+          metadata.referralType,
+      )
+      const level = Math.max(
+        0,
+        Math.trunc(
+          Number(
+            data.level ||
+              data.referralLevel ||
+              data.genealogyLevel ||
+              metadata.level ||
+              metadata.referralLevel ||
+              metadata.genealogyLevel ||
+              0,
+          ),
+        ),
+      )
+
+      return referralType === 'direct' || level === 1
+        ? 'directReferralBonusCC'
+        : 'indirectReferralBonusCC'
+    }
+
+    if (
+      includes('productunilevelbonus') ||
+      includes('unilevelbonus') ||
+      includes('unilevel')
+    ) {
+      return 'unilevelBonusCC'
+    }
+
+    if (
+      includes('infinitybonus') ||
+      includes('infinitymatching') ||
+      includes('infinityunilevel') ||
+      includes('infinity')
+    ) {
+      return 'infinityBonusCC'
+    }
+
+    if (includes('retailprofit') || includes('retailincome')) {
+      return 'retailProfitCC'
+    }
+
+    if (
+      includes('marketingsupportallocation') ||
+      includes('msadailyaccrual') ||
+      includes('marketingsupport') ||
+      tokens.some((token) => token === 'msa')
+    ) {
+      return 'marketingSupportAllocationCC'
+    }
+
+    return null
+  }
+
+  const recordAmountCC = (data: DocumentData): number =>
+    positiveFiniteNumberV3(
+      data.creditedAmountCC,
+      data.qualifiedAmountCC,
+      data.netAmountCC,
+      data.commissionAmountCC,
+      data.rewardAmountCC,
+      data.retailProfitCC,
+      data.profitCC,
+      data.amountCC,
+      data.amount,
+      data.dailyAllocationCC,
+    )
+
+  const recordOwnerUid = (data: DocumentData): string => {
+    const metadata = dashboardRecordV3(data.metadata)
+
+    return cleanStringV2(
+      data.earnerUid ||
+        data.uid ||
+        data.beneficiaryUid ||
+        data.userUid ||
+        data.ownerUid ||
+        metadata.earnerUid ||
+        metadata.uid ||
+        metadata.beneficiaryUid ||
+        metadata.userUid ||
+        metadata.ownerUid,
+    )
+  }
+
+  const recordLevel = (data: DocumentData): number => {
+    const metadata = dashboardRecordV3(data.metadata)
+
+    return Math.max(
+      0,
+      Math.trunc(
+        Number(
+          data.level ||
+            data.referralLevel ||
+            data.leadershipLevel ||
+            data.unilevelLevel ||
+            data.genealogyLevel ||
+            metadata.level ||
+            metadata.referralLevel ||
+            metadata.leadershipLevel ||
+            metadata.unilevelLevel ||
+            metadata.genealogyLevel ||
+            0,
+        ),
+      ),
+    )
+  }
+
+  const recordSourceId = (
+    category: IncomeCategoryV5,
+    record: IncomeRecordV5,
+  ): string => {
+    const data = record.data
+    const metadata = dashboardRecordV3(data.metadata)
+    const ownerUid = recordOwnerUid(data) || earnerUid
+    const level = recordLevel(data)
+
+    const sourceMsaDailyAccrualId = cleanStringV2(
+      data.sourceMsaDailyAccrualId ||
+        data.dailyAccrualId ||
+        metadata.sourceMsaDailyAccrualId ||
+        metadata.dailyAccrualId,
+    )
+
+    if (sourceMsaDailyAccrualId) {
+      // One daily MSA source can create one MSA Allocation for the beneficiary
+      // and one Leadership Bonus per upline. Category + earner keeps them
+      // separate while merging duplicate commission/wallet read models.
+      return `${category}:msa-daily:${ownerUid}:${sourceMsaDailyAccrualId}`
+    }
+
+    const sourceCommissionId = cleanStringV2(
+      data.sourceCommissionId ||
+        metadata.sourceCommissionId,
+    )
+
+    if (sourceCommissionId) {
+      return `${category}:source-commission:${ownerUid}:${sourceCommissionId}`
+    }
+
+    const sourceOrderId = cleanStringV2(
+      data.sourceOrderId ||
+        data.orderId ||
+        data.productOrderId ||
+        metadata.sourceOrderId ||
+        metadata.orderId ||
+        metadata.productOrderId,
+    )
+
+    if (sourceOrderId) {
+      return `${category}:order:${ownerUid}:${sourceOrderId}:${level}`
+    }
+
+    const sourceRewardId = cleanStringV2(
+      data.sourceRewardId ||
+        data.rewardId ||
+        metadata.sourceRewardId ||
+        metadata.rewardId,
+    )
+
+    if (sourceRewardId) {
+      return `${category}:reward:${ownerUid}:${sourceRewardId}`
+    }
+
+    const sourceEventId = cleanStringV2(
+      data.activationEventId ||
+        data.sourceActivationEventId ||
+        data.sourceEventId ||
+        data.packageActivationEventId ||
+        metadata.activationEventId ||
+        metadata.sourceActivationEventId ||
+        metadata.sourceEventId ||
+        metadata.packageActivationEventId,
+    )
+
+    if (sourceEventId) {
+      return `${category}:event:${ownerUid}:${sourceEventId}:${level}`
+    }
+
+    const ownCommissionId = cleanStringV2(
+      data.commissionId ||
+        data.referenceNumber ||
+        metadata.commissionId ||
+        metadata.referenceNumber,
+    )
+
+    if (ownCommissionId) {
+      return `${category}:commission:${ownerUid}:${ownCommissionId}`
+    }
+
+    return `${category}:${record.collectionName}:${record.documentId}`
+  }
+
+  const sourcePriority = (collectionName: string): number => {
+    if (collectionName === 'commissions') return 5
+    if (collectionName === 'retail_profits') return 5
+    if (collectionName === 'leadership_rewards') return 5
+    if (collectionName === 'msa_daily_accruals') return 4
+    if (collectionName === 'wallet_transactions') return 2
+    return 1
+  }
+
+  const allRecords = [
+    ...commissionRecords,
+    ...retailProfitRecords,
+    ...leadershipRewardRecords,
+    ...msaDailyRecords,
+    ...walletRecords,
+  ]
+
+  allRecords.forEach((record) => {
+    if (!recordStatusIsCredited(record)) return
+
+    const data = record.data
+    const ownerUid = recordOwnerUid(data)
+
+    if (ownerUid && ownerUid !== earnerUid) return
+
+    if (record.collectionName === 'wallet_transactions') {
+      const direction = normalizeDashboardTokenV3(data.direction)
+      if (direction && direction !== 'credit') return
+
+      const transactionType = normalizeDashboardTokenV3(
+        data.transactionType || data.type,
+      )
+
+      const supportedWalletIncome =
+        transactionType === 'commissioncredit' ||
+        transactionType === 'msadailyaccrual' ||
+        transactionType.includes('retailprofit') ||
+        transactionType.includes('leadershipreward') ||
+        transactionType.includes('rewardcredit')
+
+      if (!supportedWalletIncome) return
+    }
+
+    const category = classifyIncome(record)
+    if (!category) return
+
+    const amountCC = roundCCV2(recordAmountCC(data))
+    if (amountCC <= 0) return
+
+    const dedupeKey = recordSourceId(category, record)
+    const priority = sourcePriority(record.collectionName)
+    const existing = creditedByKey.get(dedupeKey)
+
+    // Prefer authoritative commission/specialized records. The immutable
+    // wallet transaction is retained only as a fallback when the source record
+    // is missing or carries a smaller legacy amount.
+    if (
+      !existing ||
+      priority > existing.priority ||
+      (priority === existing.priority && amountCC > existing.amountCC)
+    ) {
+      creditedByKey.set(dedupeKey, {
+        category,
+        amountCC,
+        priority,
+      })
+    }
+  })
+
+  const totals: DashboardCommissionIncomeTotalsV4 = {
+    directReferralBonusCC: 0,
+    indirectReferralBonusCC: 0,
+    unilevelBonusCC: 0,
+    leadershipBonusCC: 0,
+    infinityBonusCC: 0,
+    retailProfitCC: 0,
+    leadershipRewardCC: 0,
+    marketingSupportAllocationCC: 0,
+    totalCommissionIncomeCC: 0,
+  }
+
+  creditedByKey.forEach(({ category, amountCC }) => {
+    totals[category] = roundCCV2(totals[category] + amountCC)
+  })
+
+  totals.totalCommissionIncomeCC = roundCCV2(
+    totals.directReferralBonusCC +
+      totals.indirectReferralBonusCC +
+      totals.unilevelBonusCC +
+      totals.leadershipBonusCC +
+      totals.infinityBonusCC +
+      totals.retailProfitCC +
+      totals.leadershipRewardCC +
+      totals.marketingSupportAllocationCC,
+  )
+
+  return totals
+}
+
+
+interface CommissionWalletReconciliationResultV1 {
+  success: true
+  reconciliationId: string
+  totalCommissionIncomeCC: number
+  marketingSupportAllocationCC: number
+  leadershipRewardCC: number
+  transferableLifetimeEarningsCC: number
+  completedCommissionWalletDebitsCC: number
+  expectedCommissionWalletBalanceCC: number
+  previousCommissionWalletBalanceCC: number
+  commissionWalletBalanceCC: number
+  adjustmentCC: number
+  status: 'Reconciled' | 'Already Reconciled'
+  idempotentReplay: boolean
+}
+
+async function calculateCompletedCommissionWalletDebitsV1(
+  uid: string,
+): Promise<number> {
+  interface DebitRecordV1 {
+    id: string
+    data: DocumentData
+    source: 'wallet_transactions' | 'earnings_wallet_transfers'
+  }
+
+  const [walletResult, transferResult] = await Promise.allSettled([
+    db.collection('wallet_transactions').where('uid', '==', uid).get(),
+    db.collection('earnings_wallet_transfers').where('uid', '==', uid).get(),
+  ])
+
+  const records: DebitRecordV1[] = []
+
+  if (walletResult.status === 'fulfilled') {
+    walletResult.value.docs.forEach((documentSnapshot) => {
+      records.push({
+        id: documentSnapshot.id,
+        data: documentSnapshot.data() || {},
+        source: 'wallet_transactions',
+      })
+    })
+  }
+
+  if (transferResult.status === 'fulfilled') {
+    transferResult.value.docs.forEach((documentSnapshot) => {
+      records.push({
+        id: documentSnapshot.id,
+        data: documentSnapshot.data() || {},
+        source: 'earnings_wallet_transfers',
+      })
+    })
+  }
+
+  const completedStatuses = new Set([
+    'completed',
+    'credited',
+    'success',
+    'successful',
+    'succeeded',
+    'settled',
+    'posted',
+    'approved',
+    'released',
+  ])
+
+  const debitsByTransferKey = new Map<string, number>()
+
+  records.forEach((record) => {
+    const data = record.data
+    const metadata = dashboardRecordV3(data.metadata)
+    const status = normalizeDashboardTokenV3(
+      data.status ||
+        data.transferStatus ||
+        data.ledgerStatus ||
+        metadata.status ||
+        metadata.transferStatus ||
+        metadata.ledgerStatus,
+    )
+
+    if (status && !completedStatuses.has(status)) return
+
+    const sourceWallet = normalizeDashboardTokenV3(
+      data.sourceWallet ||
+        data.walletType ||
+        metadata.sourceWallet ||
+        metadata.walletType,
+    )
+    const direction = normalizeDashboardTokenV3(
+      data.direction ||
+        data.entryType ||
+        metadata.direction ||
+        metadata.entryType,
+    )
+    const transactionType = normalizeDashboardTokenV3(
+      data.transactionType ||
+        data.transferType ||
+        data.type ||
+        metadata.transactionType ||
+        metadata.transferType ||
+        metadata.type,
+    )
+
+    const isCommissionWallet =
+      sourceWallet === 'commissionwallet' ||
+      sourceWallet === 'commission' ||
+      sourceWallet === 'balancecommissions'
+
+    const isDebitDirection =
+      direction === 'debit' ||
+      direction === 'out' ||
+      direction === 'outgoing'
+
+    const isSupportedDebitType =
+      transactionType.includes('earningstransferdebit') ||
+      transactionType.includes('commissionwalletdebit') ||
+      transactionType.includes('commissiontochosen') ||
+      transactionType.includes('commissiontowithdrawable') ||
+      transactionType.includes('commissiontransfer') ||
+      transactionType.includes('commissioncashout')
+
+    if (
+      record.source === 'wallet_transactions' &&
+      (!isCommissionWallet || (!isDebitDirection && !isSupportedDebitType))
+    ) {
+      return
+    }
+
+    if (
+      record.source === 'earnings_wallet_transfers' &&
+      !isCommissionWallet
+    ) {
+      return
+    }
+
+    const amountCC = roundCCV2(
+      positiveFiniteNumberV3(
+        data.amountCC,
+        data.transferAmountCC,
+        data.debitAmountCC,
+        data.amount,
+      ),
+    )
+
+    if (amountCC <= 0) return
+
+    const transferKey =
+      cleanStringV2(
+        data.sourceTransferId ||
+          data.transferId ||
+          data.referenceNumber ||
+          data.idempotencyKey ||
+          metadata.sourceTransferId ||
+          metadata.transferId ||
+          metadata.referenceNumber ||
+          metadata.idempotencyKey,
+      ) || `${record.source}:${record.id}`
+
+    const existing = Number(debitsByTransferKey.get(transferKey) || 0)
+    debitsByTransferKey.set(transferKey, Math.max(existing, amountCC))
+  })
+
+  return roundCCV2(
+    [...debitsByTransferKey.values()].reduce(
+      (total, amountCC) => total + amountCC,
+      0,
+    ),
+  )
+}
+
+async function reconcileUntouchedCommissionWalletV1(
+  uid: string,
+): Promise<CommissionWalletReconciliationResultV1> {
+  const reconciliationVersion = 'COMMISSION_WALLET_BACKFILL_V1'
+  const reconciliationId = deterministicFinancialIdV2(
+    'COMM-WALLET-RECON',
+    `${uid}:${reconciliationVersion}`,
+  )
+
+  const reconciliationRef = db
+    .collection('wallet_reconciliations')
+    .doc(reconciliationId)
+
+  const existingReconciliation = await reconciliationRef.get()
+
+  if (existingReconciliation.exists) {
+    const existingData = existingReconciliation.data() || {}
+
+    return {
+      success: true,
+      reconciliationId,
+      totalCommissionIncomeCC: roundCCV2(
+        Number(existingData.totalCommissionIncomeCC || 0),
+      ),
+      marketingSupportAllocationCC: roundCCV2(
+        Number(existingData.marketingSupportAllocationCC || 0),
+      ),
+      leadershipRewardCC: roundCCV2(
+        Number(existingData.leadershipRewardCC || 0),
+      ),
+      transferableLifetimeEarningsCC: roundCCV2(
+        Number(existingData.transferableLifetimeEarningsCC || 0),
+      ),
+      completedCommissionWalletDebitsCC: roundCCV2(
+        Number(existingData.completedCommissionWalletDebitsCC || 0),
+      ),
+      expectedCommissionWalletBalanceCC: roundCCV2(
+        Number(existingData.expectedCommissionWalletBalanceCC || 0),
+      ),
+      previousCommissionWalletBalanceCC: roundCCV2(
+        Number(existingData.previousCommissionWalletBalanceCC || 0),
+      ),
+      commissionWalletBalanceCC: roundCCV2(
+        Number(existingData.commissionWalletBalanceCC || 0),
+      ),
+      adjustmentCC: roundCCV2(Number(existingData.adjustmentCC || 0)),
+      status: 'Already Reconciled',
+      idempotentReplay: true,
+    }
+  }
+
+  const [commissionIncome, completedDebitsCC] = await Promise.all([
+    calculateCommissionIncomeTotalsV5(uid),
+    calculateCompletedCommissionWalletDebitsV1(uid),
+  ])
+
+  // MSA remains in the Marketing Support Wallet. Leadership Rewards remain
+  // in the Reward Wallet. Neither may be duplicated in Balance Commissions.
+  const transferableLifetimeEarningsCC = roundCCV2(
+    Math.max(
+      commissionIncome.totalCommissionIncomeCC -
+        commissionIncome.marketingSupportAllocationCC -
+        commissionIncome.leadershipRewardCC,
+      0,
+    ),
+  )
+
+  const expectedCommissionWalletBalanceCC = roundCCV2(
+    Math.max(
+      transferableLifetimeEarningsCC - completedDebitsCC,
+      0,
+    ),
+  )
+
+  const walletRef = db.collection('wallets').doc(uid)
+  const userRef = db.collection('users').doc(uid)
+  const ledgerId = deterministicFinancialIdV2(
+    'TX-COMM-WALLET-RECON',
+    `${reconciliationId}:adjustment`,
+  )
+  const ledgerRef = db.collection('wallet_transactions').doc(ledgerId)
+  const auditId = deterministicFinancialIdV2(
+    'LOG-COMM-WALLET-RECON',
+    `${reconciliationId}:audit`,
+  )
+  const auditRef = db.collection('audit_logs').doc(auditId)
+
+  return db.runTransaction(
+    async (
+      transaction: Transaction,
+    ): Promise<CommissionWalletReconciliationResultV1> => {
+      const [
+        reconciliationSnapshot,
+        walletSnapshot,
+        userSnapshot,
+        ledgerSnapshot,
+      ] = await Promise.all([
+        transaction.get(reconciliationRef),
+        transaction.get(walletRef),
+        transaction.get(userRef),
+        transaction.get(ledgerRef),
+      ])
+
+      if (reconciliationSnapshot.exists) {
+        const existingData = reconciliationSnapshot.data() || {}
+
+        return {
+          success: true,
+          reconciliationId,
+          totalCommissionIncomeCC: roundCCV2(
+            Number(existingData.totalCommissionIncomeCC || 0),
+          ),
+          marketingSupportAllocationCC: roundCCV2(
+            Number(existingData.marketingSupportAllocationCC || 0),
+          ),
+          leadershipRewardCC: roundCCV2(
+            Number(existingData.leadershipRewardCC || 0),
+          ),
+          transferableLifetimeEarningsCC: roundCCV2(
+            Number(existingData.transferableLifetimeEarningsCC || 0),
+          ),
+          completedCommissionWalletDebitsCC: roundCCV2(
+            Number(existingData.completedCommissionWalletDebitsCC || 0),
+          ),
+          expectedCommissionWalletBalanceCC: roundCCV2(
+            Number(existingData.expectedCommissionWalletBalanceCC || 0),
+          ),
+          previousCommissionWalletBalanceCC: roundCCV2(
+            Number(existingData.previousCommissionWalletBalanceCC || 0),
+          ),
+          commissionWalletBalanceCC: roundCCV2(
+            Number(existingData.commissionWalletBalanceCC || 0),
+          ),
+          adjustmentCC: roundCCV2(Number(existingData.adjustmentCC || 0)),
+          status: 'Already Reconciled',
+          idempotentReplay: true,
+        }
+      }
+
+      if (!userSnapshot.exists) {
+        throw new Error('COMMISSION_RECONCILIATION_USER_NOT_FOUND')
+      }
+
+      const userData = userSnapshot.data() || {}
+      const walletData = walletSnapshot.exists
+        ? walletSnapshot.data() || {}
+        : {}
+
+      const previousCommissionWalletBalanceCC = roundCCV2(
+        Math.max(
+          Number(walletData.commissionWalletBalance || 0),
+          0,
+        ),
+      )
+      const adjustmentCC = roundCCV2(
+        expectedCommissionWalletBalanceCC -
+          previousCommissionWalletBalanceCC,
+      )
+      const timestamp = new Date().toISOString()
+      const memberId = cleanStringV2(userData.memberId)
+
+      if (walletSnapshot.exists) {
+        transaction.update(walletRef, {
+          commissionWalletBalance: expectedCommissionWalletBalanceCC,
+          walletVersion: Number(walletData.walletVersion || 0) + 1,
+          updatedAt: timestamp,
+        })
+      } else {
+        transaction.set(walletRef, {
+          uid,
+          chosenWalletBalance: 0,
+          commissionWalletBalance: expectedCommissionWalletBalanceCC,
+          marketingSupportWalletBalance: 0,
+          rewardWalletBalance: 0,
+          cashWalletBalance: 0,
+          cashWalletStatus: 'Active',
+          walletVersion: 1,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        })
+      }
+
+      if (adjustmentCC !== 0 && !ledgerSnapshot.exists) {
+        transaction.set(ledgerRef, {
+          id: ledgerId,
+          transactionId: ledgerId,
+          uid,
+          memberId,
+          walletType: 'Commission Wallet',
+          transactionType:
+            adjustmentCC > 0
+              ? 'COMMISSION_WALLET_RECONCILIATION_CREDIT'
+              : 'COMMISSION_WALLET_RECONCILIATION_DEBIT',
+          direction: adjustmentCC > 0 ? 'Credit' : 'Debit',
+          amount: Math.abs(adjustmentCC),
+          amountCC: Math.abs(adjustmentCC),
+          balanceBefore: previousCommissionWalletBalanceCC,
+          balanceAfter: expectedCommissionWalletBalanceCC,
+          sourceType: 'COMMISSION_WALLET_RECONCILIATION',
+          sourceId: reconciliationId,
+          referenceNumber: reconciliationId,
+          description:
+            'Commission Wallet reconciled from authoritative credited earnings.',
+          countsAsNewEarning: false,
+          countsTowardBusinessCycle: false,
+          generatesCommission: false,
+          status: 'Completed',
+          createdAt: timestamp,
+          completedAt: timestamp,
+          timestamp,
+        })
+      }
+
+      const result: CommissionWalletReconciliationResultV1 = {
+        success: true,
+        reconciliationId,
+        totalCommissionIncomeCC:
+          commissionIncome.totalCommissionIncomeCC,
+        marketingSupportAllocationCC:
+          commissionIncome.marketingSupportAllocationCC,
+        leadershipRewardCC: commissionIncome.leadershipRewardCC,
+        transferableLifetimeEarningsCC,
+        completedCommissionWalletDebitsCC: completedDebitsCC,
+        expectedCommissionWalletBalanceCC,
+        previousCommissionWalletBalanceCC,
+        commissionWalletBalanceCC: expectedCommissionWalletBalanceCC,
+        adjustmentCC,
+        status: 'Reconciled',
+        idempotentReplay: false,
+      }
+
+      transaction.set(reconciliationRef, {
+        ...result,
+        uid,
+        memberId,
+        reconciliationVersion,
+        countsAsNewEarning: false,
+        countsTowardBusinessCycle: false,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      })
+
+      transaction.set(auditRef, {
+        id: auditId,
+        actorUid: uid,
+        actorEmail: cleanStringV2(userData.email),
+        action: 'COMMISSION_WALLET_RECONCILED',
+        details: {
+          reconciliationId,
+          totalCommissionIncomeCC:
+            commissionIncome.totalCommissionIncomeCC,
+          excludedMarketingSupportAllocationCC:
+            commissionIncome.marketingSupportAllocationCC,
+          excludedLeadershipRewardCC:
+            commissionIncome.leadershipRewardCC,
+          completedCommissionWalletDebitsCC: completedDebitsCC,
+          previousCommissionWalletBalanceCC,
+          commissionWalletBalanceCC:
+            expectedCommissionWalletBalanceCC,
+          adjustmentCC,
+        },
+        timestamp,
+      })
+
+      return result
+    },
+  )
+}
+
+/**
+ * One-time member-safe reconciliation for legacy credited earnings that did
+ * not reach the Commission Wallet. The calculation is server-authored and
+ * cannot be supplied or inflated by the browser.
+ */
+export const reconcileMyCommissionWalletBalance = onCall(
+  {
+    region: FUNCTIONS_REGION,
+    timeoutSeconds: 540,
+    memory: '1GiB',
+  },
+  async (
+    request: CallableRequest<Record<string, never>>,
+  ): Promise<CommissionWalletReconciliationResultV1> => {
+    if (!request.auth) {
+      throw new HttpsError(
+        'unauthenticated',
+        'Authentication credentials are required.',
+      )
+    }
+
+    try {
+      return await reconcileUntouchedCommissionWalletV1(
+        request.auth.uid,
+      )
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : String(error)
+
+      console.error('reconcileMyCommissionWalletBalance failed', {
+        uid: request.auth.uid,
+        message,
+        stack: error instanceof Error ? error.stack : null,
+      })
+
+      if (message === 'COMMISSION_RECONCILIATION_USER_NOT_FOUND') {
+        throw new HttpsError('not-found', 'User profile not found.')
+      }
+
+      throw new HttpsError(
+        'internal',
+        'The Commission Wallet could not be reconciled.',
+      )
+    }
+  },
+)
+
+async function calculateDashboardNetworkSummaryV4(
+  uid: string,
+): Promise<DashboardNetworkSummaryV4> {
+  const userSnapshot = await db.collection('users').doc(uid).get()
+
+  if (!userSnapshot.exists) {
+    throw new Error('NETWORK_SUMMARY_USER_NOT_FOUND')
+  }
+
+  const rootData = userSnapshot.data() || {}
+  const descendants = await buildCompleteDownlineV3(uid, rootData)
+  const activeNetwork = descendants.filter((node) =>
+    isActiveNetworkPartnerV3(node.data),
+  )
+
+  const directPartnerCount = activeNetwork.filter(
+    (node) => node.level === 1,
+  ).length
+  const totalNetworkCount = activeNetwork.length
+  const groupUids = activeNetwork.map((node) => node.uid)
+  const allVolumeOwnerUids = [...new Set([uid, ...groupUids])]
+
+  const [
+    orderVolumes,
+    packagePurchaseVolumes,
+    walletPurchaseVolumes,
+    commissionIncome,
+  ] = await Promise.all([
+    loadProductOrderVolumesV3(allVolumeOwnerUids),
+    loadPackagePurchaseVolumesV3(allVolumeOwnerUids),
+    loadWalletPurchaseVolumesV3(allVolumeOwnerUids),
+    calculateCommissionIncomeTotalsV5(uid),
+  ])
+
+  const productVolumeForUid = (ownerUid: string): number => {
+    if (orderVolumes.ownersWithRecords.has(ownerUid)) {
+      return Number(orderVolumes.totalsByUid.get(ownerUid) || 0)
+    }
+
+    return Number(walletPurchaseVolumes.productTotalsByUid.get(ownerUid) || 0)
+  }
+
+  const packageVolumeForUid = (ownerUid: string): number => {
+    if (packagePurchaseVolumes.ownersWithRecords.has(ownerUid)) {
+      return Number(packagePurchaseVolumes.totalsByUid.get(ownerUid) || 0)
+    }
+
+    return Number(walletPurchaseVolumes.packageTotalsByUid.get(ownerUid) || 0)
+  }
+
+  const personalProductVolumeCC = roundCCV2(productVolumeForUid(uid))
+  const personalPackageVolumeCC = roundCCV2(packageVolumeForUid(uid))
+  const groupProductVolumeCC = roundCCV2(
+    groupUids.reduce(
+      (total, ownerUid) => total + productVolumeForUid(ownerUid),
+      0,
+    ),
+  )
+  const groupPackageVolumeCC = roundCCV2(
+    groupUids.reduce(
+      (total, ownerUid) => total + packageVolumeForUid(ownerUid),
+      0,
+    ),
+  )
+
+  const timestamp = new Date().toISOString()
+
+  const summary: DashboardNetworkSummaryV4 = {
+    uid,
+    directPartnerCount,
+    directPartners: directPartnerCount,
+    totalNetworkCount,
+    totalNetworkMembers: totalNetworkCount,
+    personalProductVolumeCC,
+    personalPackageVolumeCC,
+    groupProductVolumeCC,
+    groupPackageVolumeCC,
+    ...commissionIncome,
+    schemaVersion: 5,
+    calculationSource: 'SERVER_AUTHORITATIVE',
+    generatedAt: timestamp,
+    updatedAt: timestamp,
+  }
+
+  const batch = db.batch()
+  batch.set(db.collection('dashboard_summary').doc(uid), summary, {
+    merge: true,
+  })
+  batch.set(db.collection('dashboard_summaries').doc(uid), summary, {
+    merge: true,
+  })
+  await batch.commit()
+
+  return summary
+}
+
+/**
+ * Rebuild the authenticated member's Network Summary from authoritative
+ * Firestore data. The browser never traverses genealogy or calculates
+ * financial totals.
+ */
+export const refreshMyDashboardSummary = onCall(
+  {
+    region: FUNCTIONS_REGION,
+    timeoutSeconds: 540,
+    memory: '1GiB',
+  },
+  async (request: CallableRequest<Record<string, never>>) => {
+    if (!request.auth) {
+      throw new HttpsError(
+        'unauthenticated',
+        'Authentication credentials are required.',
+      )
+    }
+
+    try {
+      return await calculateDashboardNetworkSummaryV4(request.auth.uid)
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+
+      console.error('refreshMyDashboardSummary failed', {
+        uid: request.auth.uid,
+        message,
+        stack: error instanceof Error ? error.stack : null,
+      })
+
+      if (message === 'NETWORK_SUMMARY_USER_NOT_FOUND') {
+        throw new HttpsError('not-found', 'User profile not found.')
+      }
+
+      if (
+        message === 'NETWORK_SUMMARY_MAXIMUM_SIZE_EXCEEDED' ||
+        message === 'NETWORK_SUMMARY_GENEALOGY_DEPTH_EXCEEDED'
+      ) {
+        throw new HttpsError(
+          'failed-precondition',
+          'The genealogy requires administrative review before the Network Summary can be generated.',
+        )
+      }
+
+      throw new HttpsError(
+        'internal',
+        'The Network Summary could not be refreshed.',
+      )
+    }
   },
 )

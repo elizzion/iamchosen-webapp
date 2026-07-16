@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import {
   Wallet as WalletIcon,
   Award,
@@ -48,6 +48,7 @@ import {
   query,
   where,
   limit,
+  onSnapshot,
 } from 'firebase/firestore'
 import {
   UserProfile,
@@ -66,6 +67,7 @@ import { AIService } from '../services/ai/ai.service'
 import DashboardPerformanceCards from './dashboard/performance/DashboardPerformanceCards'
 import { AffiliateGrowthToolsSection } from './AffiliateGrowthTools'
 import ChosenWalletCard from './wallet/ChosenWalletCard'
+import MemberWelcomeBanner from './member/MemberWelcomeBanner'
 import MyDigitalWallet from './wallet/MyDigitalWallet'
 import RecentActivityCard from './customer/RecentActivityCard'
 
@@ -328,6 +330,223 @@ const resolveBusinessCycleStatus = (
   return rawStatus === 'completed' ? 'Completed' : 'Active'
 }
 
+type EarningsRecord = Record<string, unknown>
+
+function readEarningsString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim()
+    }
+  }
+
+  return ''
+}
+
+function readEarningsAmount(...values: unknown[]): number {
+  for (const value of values) {
+    const amount =
+      typeof value === 'number'
+        ? value
+        : typeof value === 'string' && value.trim()
+          ? Number(value)
+          : Number.NaN
+
+    if (Number.isFinite(amount)) {
+      return amount
+    }
+  }
+
+  return 0
+}
+
+function normalizeEarningsToken(value: unknown): string {
+  return String(value || '')
+    .trim()
+    .toUpperCase()
+    .replaceAll('-', '_')
+    .replaceAll(' ', '_')
+}
+
+function toEarningsDate(value: unknown): Date | null {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value
+  }
+
+  if (typeof value === 'string' || typeof value === 'number') {
+    const date = new Date(value)
+    return Number.isNaN(date.getTime()) ? null : date
+  }
+
+  if (value && typeof value === 'object') {
+    const timestamp = value as {
+      toDate?: () => Date
+      seconds?: number
+      _seconds?: number
+    }
+
+    if (typeof timestamp.toDate === 'function') {
+      const date = timestamp.toDate()
+      return Number.isNaN(date.getTime()) ? null : date
+    }
+
+    const seconds = Number(timestamp.seconds ?? timestamp._seconds)
+    if (Number.isFinite(seconds) && seconds > 0) {
+      return new Date(seconds * 1000)
+    }
+  }
+
+  return null
+}
+
+function getManilaEarningsDateKey(value: Date = new Date()): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Manila',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(value)
+
+  const year = parts.find((part) => part.type === 'year')?.value || ''
+  const month = parts.find((part) => part.type === 'month')?.value || ''
+  const day = parts.find((part) => part.type === 'day')?.value || ''
+
+  return year && month && day ? `${year}-${month}-${day}` : ''
+}
+
+function readEarningsDateKey(record: EarningsRecord): string {
+  const directDateKey = readEarningsString(
+    record.accrualDate,
+    record.creditDate,
+    record.earningDate,
+  )
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(directDateKey)) {
+    return directDateKey
+  }
+
+  const date = toEarningsDate(
+    record.completedAt ??
+      record.creditedAt ??
+      record.createdAt ??
+      record.timestamp ??
+      record.updatedAt,
+  )
+
+  return date ? getManilaEarningsDateKey(date) : ''
+}
+
+function isCompletedEarningStatus(record: EarningsRecord): boolean {
+  const status = normalizeEarningsToken(record.status)
+
+  return (
+    status === 'COMPLETED' ||
+    status === 'CREDITED' ||
+    status === 'PAID' ||
+    status === 'ACCRUED' ||
+    status === 'PARTIALLY_ACCRUED'
+  )
+}
+
+function isIncomeLedgerTransaction(record: EarningsRecord): boolean {
+  if (!isCompletedEarningStatus(record)) return false
+
+  const transactionType = normalizeEarningsToken(record.transactionType)
+  const sourceType = normalizeEarningsToken(record.sourceType)
+  const commissionType = normalizeEarningsToken(record.commissionType)
+  const walletType = normalizeEarningsToken(record.walletType)
+  const direction = normalizeEarningsToken(record.direction)
+  const entryType = normalizeEarningsToken(record.type)
+  const description = normalizeEarningsToken(record.description)
+
+  if (
+    direction === 'DEBIT' ||
+    entryType === 'DEBIT' ||
+    description.includes('REFUND') ||
+    description.includes('REVERSAL') ||
+    description.includes('ADJUSTMENT')
+  ) {
+    return false
+  }
+
+  const excludedTransactionTypes = new Set([
+    'CASH_IN',
+    'CASHIN',
+    'P2P_RECEIVE',
+    'P2P_TRANSFER_RECEIVE',
+    'ADMIN_DIRECT_CC_DEPOSIT',
+    'DIRECT_CC_DEPOSIT',
+    'DIRECT_ADMIN_DEPOSIT',
+    'ADMIN_WALLET_CREDIT',
+    'MANUAL_CC_DEPOSIT',
+    'MSA_CREDIT',
+    'MSA_TRANSFER_DEBIT',
+  ])
+
+  if (
+    excludedTransactionTypes.has(transactionType) ||
+    excludedTransactionTypes.has(sourceType)
+  ) {
+    return false
+  }
+
+  const explicitIncomeTypes = new Set([
+    'COMMISSION_CREDIT',
+    'MSA_DAILY_ACCRUAL',
+    'MARKETING_SUPPORT_ALLOCATION',
+    'DIRECT_REFERRAL_BONUS',
+    'INDIRECT_REFERRAL_BONUS',
+    'UNILEVEL_BONUS',
+    'LEADERSHIP_BONUS',
+    'DIRECT_LEADERSHIP',
+    'INDIRECT_LEADERSHIP',
+    'MSA_LEADERSHIP_BONUS',
+    'RETAIL_PROFIT',
+    'INFINITY_BONUS',
+    'LEADERSHIP_REWARD',
+  ])
+
+  if (
+    explicitIncomeTypes.has(transactionType) ||
+    explicitIncomeTypes.has(sourceType) ||
+    explicitIncomeTypes.has(commissionType)
+  ) {
+    return true
+  }
+
+  return (
+    (walletType === 'COMMISSION_WALLET' ||
+      walletType === 'MARKETING_SUPPORT_WALLET' ||
+      walletType === 'REWARD_WALLET') &&
+    (direction === 'CREDIT' || entryType === 'CREDIT') &&
+    Boolean(commissionType)
+  )
+}
+
+function getIncomeRecordKey(
+  record: EarningsRecord,
+  source: 'ledger' | 'commission',
+): string {
+  const commissionId = readEarningsString(
+    record.commissionId,
+    record.sourceCommissionId,
+    record.referenceNumber,
+  )
+  const msaAccrualId = readEarningsString(
+    record.sourceMsaDailyAccrualId,
+    record.dailyAccrualId,
+  )
+  const recordId = readEarningsString(
+    record.transactionId,
+    record.id,
+    record.referenceNumber,
+  )
+
+  if (msaAccrualId) return `msa:${msaAccrualId}`
+  if (commissionId) return `commission:${commissionId}`
+
+  return `${source}:${recordId || JSON.stringify(record)}`
+}
+
 interface AffiliateDashboardProps {
   userProfile: UserProfile
   onLogout: () => void
@@ -367,6 +586,7 @@ export default function AffiliateDashboard({
   const [commissionHistory, setCommissionHistory] = useState<any[]>([])
   const [p2pReceivedHistory, setP2pReceivedHistory] = useState<any[]>([])
   const [p2pSentHistory, setP2pSentHistory] = useState<any[]>([])
+  const [walletTransactions, setWalletTransactions] = useState<any[]>([])
 
   // Transfer Modal state
   const [showTransferModal, setShowTransferModal] = useState(false)
@@ -400,7 +620,8 @@ export default function AffiliateDashboard({
   const [activeActionModal, setActiveActionModal] = useState<string | null>(
     null,
   )
-  const [commissionSummary, setCommissionSummary] = useState<any>(null)
+  const [commissionSummary, setCommissionSummary] = useState<any>(null)
+  const [totalCommissionIncomeCC, setTotalCommissionIncomeCC] = useState(0)
   const [downlineList, setDownlineList] = useState<any[]>([])
 
   // Simulation state
@@ -422,6 +643,45 @@ export default function AffiliateDashboard({
   const [notifications, setNotifications] = useState<Notification[]>([])
   const [showNotificationsDropdown, setShowNotificationsDropdown] =
     useState(false)
+
+  const applyRequestedAffiliateView = useCallback(
+    (requestedView: string): void => {
+      setShowMyDigitalWallet(false)
+      setActiveActionModal(null)
+      setShowAICoachModal(false)
+
+      if (requestedView === 'wallet' || requestedView === 'cash-in') {
+        setShowMyDigitalWallet(true)
+        setActiveMobileTab('wallet')
+        window.scrollTo({ top: 0, behavior: 'smooth' })
+        return
+      }
+
+      setActiveMobileTab('home')
+
+      if (requestedView === 'ai-coach') {
+        setShowAICoachModal(true)
+        return
+      }
+
+      if (
+        [
+          'team',
+          'orders',
+          'commissions',
+          'marketing',
+          'academy',
+          'support',
+        ].includes(requestedView)
+      ) {
+        setActiveActionModal(requestedView)
+        return
+      }
+
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+    },
+    [],
+  )
 
   const returnToMainDashboardAfterUpgrade = useCallback(() => {
     setUpgradeRedirecting(true)
@@ -479,41 +739,135 @@ export default function AffiliateDashboard({
   useEffect(() => {
     fetchDashboardData()
   }, [userProfile.uid])
+  // Lifetime Total Earnings comes from the server-authored dashboard summary.
+  // Balance Commissions remains the current transferable Commission Wallet.
+  useEffect(() => {
+    const summaryRef = doc(db, 'dashboard_summary', userProfile.uid)
+
+    const unsubscribeSummary = onSnapshot(
+      summaryRef,
+      (snapshot) => {
+        if (!snapshot.exists()) {
+          setTotalCommissionIncomeCC(0)
+          return
+        }
+
+        const summaryData = snapshot.data()
+        const total = Number(
+          summaryData.totalCommissionIncomeCC ??
+            summaryData.totalIncomeCC ??
+            0,
+        )
+
+        setTotalCommissionIncomeCC(
+          Number.isFinite(total) && total > 0 ? total : 0,
+        )
+      },
+      (error) => {
+        console.error(
+          'Error subscribing to lifetime Total Commission Income:',
+          error,
+        )
+      },
+    )
+
+    return () => unsubscribeSummary()
+  }, [userProfile.uid])
+  // Live earnings and wallet ledger subscriptions.
+  // Scheduled or Admin-triggered MSA and Leadership earnings appear without
+  // requiring the Affiliate to reload the application.
+  useEffect(() => {
+    const commissionsQuery = query(
+      collection(db, 'commissions'),
+      where('earnerUid', '==', userProfile.uid),
+    )
+    const walletLedgerQuery = query(
+      collection(db, 'wallet_transactions'),
+      where('uid', '==', userProfile.uid),
+      limit(200),
+    )
 
-  // Synchronize active view state with AffiliateAppShell
+    const unsubscribeCommissions = onSnapshot(
+      commissionsQuery,
+      (snapshot) => {
+        setCommissionHistory(
+          snapshot.docs.map((documentSnapshot) => ({
+            id: documentSnapshot.id,
+            ...documentSnapshot.data(),
+          })),
+        )
+      },
+      (error) => {
+        console.error('Error subscribing to live commission earnings:', error)
+      },
+    )
+
+    const unsubscribeWalletLedger = onSnapshot(
+      walletLedgerQuery,
+      (snapshot) => {
+        setWalletTransactions(
+          snapshot.docs.map((documentSnapshot) => ({
+            id: documentSnapshot.id,
+            ...documentSnapshot.data(),
+          })),
+        )
+      },
+      (error) => {
+        console.error(
+          'Error subscribing to live wallet earnings ledger:',
+          error,
+        )
+      },
+    )
+
+    return () => {
+      unsubscribeCommissions()
+      unsubscribeWalletLedger()
+    }
+  }, [userProfile.uid])
+  // Synchronize the active dashboard view with AffiliateAppShell.
   useEffect(() => {
     const event = new CustomEvent('affiliate_view_changed', {
       detail: {
-        view: activeActionModal,
+        view: showMyDigitalWallet ? 'wallet' : activeActionModal,
         aiCoach: showAICoachModal,
       },
     })
     window.dispatchEvent(event)
-  }, [activeActionModal, showAICoachModal])
+  }, [activeActionModal, showAICoachModal, showMyDigitalWallet])
 
-  // Check for any pending navigation views from the Drawer
+  // Apply a pending Drawer request after navigating from another page.
   useEffect(() => {
     const pendingView = sessionStorage.getItem('affiliate_view')
-    if (pendingView) {
-      if (
-        [
-          'team',
-          'orders',
-          'commissions',
-          'marketing',
-          'academy',
-          'support',
-        ].includes(pendingView)
-      ) {
-        setActiveActionModal(pendingView)
-      } else if (pendingView === 'ai-coach') {
-        setShowAICoachModal(true)
-      } else if (pendingView === 'cash-in' || pendingView === 'wallet') {
-        setShowMyDigitalWallet(true)
-      }
+    if (!pendingView) return
+
+    applyRequestedAffiliateView(pendingView)
+    sessionStorage.removeItem('affiliate_view')
+  }, [applyRequestedAffiliateView])
+
+  // Apply Drawer requests immediately while this dashboard is already mounted.
+  useEffect(() => {
+    const handleAffiliateViewRequest = (event: Event): void => {
+      const customEvent = event as CustomEvent<{ view?: string }>
+      const requestedView = customEvent.detail?.view
+      if (!requestedView) return
+
+      applyRequestedAffiliateView(requestedView)
       sessionStorage.removeItem('affiliate_view')
     }
-  }, [])
+
+    window.addEventListener(
+      'affiliate_view_requested',
+      handleAffiliateViewRequest,
+    )
+
+    return () => {
+      window.removeEventListener(
+        'affiliate_view_requested',
+        handleAffiliateViewRequest,
+      )
+    }
+  }, [applyRequestedAffiliateView])
 
   const fetchDashboardData = async () => {
     setLoading(true)
@@ -697,6 +1051,29 @@ export default function AffiliateDashboard({
         err,
       )
       setP2pSentHistory([])
+    }
+
+    // Compatibility read model for legacy and canonical P2P ledger entries.
+    try {
+      const walletTransactionsQuery = query(
+        collection(db, 'wallet_transactions'),
+        where('uid', '==', userProfile.uid),
+        limit(200),
+      )
+      const walletTransactionsSnapshot = await getDocs(walletTransactionsQuery)
+
+      setWalletTransactions(
+        walletTransactionsSnapshot.docs.map((documentSnapshot) => ({
+          id: documentSnapshot.id,
+          ...documentSnapshot.data(),
+        })),
+      )
+    } catch (error) {
+      console.error(
+        'Error loading dashboard details (Activity: Wallet transactions):',
+        error,
+      )
+      setWalletTransactions([])
     }
 
     // 6. Fetch Commissions Summary
@@ -904,6 +1281,9 @@ export default function AffiliateDashboard({
         },
       )
 
+      // The callable transaction has completed, so refresh the activity ledger.
+      await fetchDashboardData()
+
       setTransferSuccess(
         `Successfully transferred ${transferAmount} CC to ${transferRecipient}!`,
       )
@@ -911,7 +1291,6 @@ export default function AffiliateDashboard({
       setTransferAmount(10)
       setTimeout(() => {
         setShowTransferModal(false)
-        fetchDashboardData()
       }, 3000)
     } catch (e: any) {
       setTransferError(e.message || 'Failed to complete P2P Transfer.')
@@ -1057,15 +1436,15 @@ export default function AffiliateDashboard({
   }
 
   const handleOpenMyDigitalWallet = (): void => {
-    setShowMyDigitalWallet(true)
-    setActiveActionModal(null)
-    setShowAICoachModal(false)
-    window.scrollTo({ top: 0, behavior: 'smooth' })
+    applyRequestedAffiliateView('wallet')
   }
 
   const handleMobileTabChange = (tab: CustomerTabType) => {
     setActiveMobileTab(tab)
-    if (tab === 'register') {
+
+    if (tab === 'home') {
+      applyRequestedAffiliateView('dashboard')
+    } else if (tab === 'register') {
       onNavigate('member-registration')
     } else if (tab === 'wallet') {
       handleOpenMyDigitalWallet()
@@ -1183,6 +1562,66 @@ export default function AffiliateDashboard({
   }
 
   const cashInRate = ccSettings?.cashInRatePHP || 70
+  const manilaTodayKey = getManilaEarningsDateKey()
+
+  const todaysEarningsCC = useMemo(() => {
+    const earningsBySource = new Map<string, number>()
+
+    walletTransactions.forEach((rawRecord) => {
+      const record = rawRecord as EarningsRecord
+
+      if (
+        !isIncomeLedgerTransaction(record) ||
+        readEarningsDateKey(record) !== manilaTodayKey
+      ) {
+        return
+      }
+
+      const amountCC = readEarningsAmount(
+        record.creditedAmountCC,
+        record.qualifiedAmountCC,
+        record.amountCC,
+        record.amount,
+      )
+
+      if (amountCC <= 0) return
+
+      earningsBySource.set(getIncomeRecordKey(record, 'ledger'), amountCC)
+    })
+
+    // Compatibility fallback for credited commission records whose historical
+    // wallet ledger entry is unavailable. Matching ledger/source IDs prevent
+    // the same income from being counted twice.
+    commissionHistory.forEach((rawRecord) => {
+      const record = rawRecord as EarningsRecord
+
+      if (
+        !isCompletedEarningStatus(record) ||
+        readEarningsDateKey(record) !== manilaTodayKey
+      ) {
+        return
+      }
+
+      const amountCC = readEarningsAmount(
+        record.creditedAmountCC,
+        record.amountCC,
+        record.amount,
+      )
+
+      if (amountCC <= 0) return
+
+      const sourceKey = getIncomeRecordKey(record, 'commission')
+      if (!earningsBySource.has(sourceKey)) {
+        earningsBySource.set(sourceKey, amountCC)
+      }
+    })
+
+    return Number(
+      Array.from(earningsBySource.values())
+        .reduce((total, amountCC) => total + amountCC, 0)
+        .toFixed(4),
+    )
+  }, [commissionHistory, manilaTodayKey, walletTransactions])
 
   // Helper to resolve package CC value
   const getPackageCCValue = (level: string): number => {
@@ -1379,6 +1818,7 @@ export default function AffiliateDashboard({
         commissions={commissionHistory}
         p2pReceived={p2pReceivedHistory}
         p2pSent={p2pSentHistory}
+        walletTransactions={walletTransactions}
         currentUid={userProfile.uid}
         accountType='Affiliate'
         layoutVariant='wide'
@@ -1585,12 +2025,19 @@ export default function AffiliateDashboard({
               commissionHistory={commissionHistory}
               p2pReceivedHistory={p2pReceivedHistory}
               p2pSentHistory={p2pSentHistory}
+              walletTransactions={walletTransactions}
               isLoading={loading}
               onRefresh={fetchDashboardData}
-              onBack={() => setShowMyDigitalWallet(false)}
+              onNavigate={onNavigate}
+              onBack={() => applyRequestedAffiliateView('dashboard')}
             />
           ) : (
             <>
+              <MemberWelcomeBanner
+                userProfile={userProfile}
+                onOpenPackage={() => onNavigate('package-selection')}
+              />
+
               {businessCycle && isBusinessCycleCompleted && (
                 <div className='bg-red-500/10 border border-red-500/20 text-red-400 p-6 rounded-3xl flex flex-col md:flex-row justify-between items-start md:items-center gap-6 relative overflow-hidden'>
                   <div className='absolute top-0 inset-y-0 left-0 w-1 bg-red-500' />
@@ -1732,7 +2179,7 @@ export default function AffiliateDashboard({
                         </div>
                         <div className='text-base font-black tracking-tight text-white mb-0.5'>
                           {wallet
-                            ? wallet.commissionWalletBalance.toFixed(2)
+                            ? totalCommissionIncomeCC.toFixed(2)
                             : '0.00'}{' '}
                           CC
                         </div>
@@ -1740,7 +2187,7 @@ export default function AffiliateDashboard({
                           ≈ ₱
                           {wallet
                             ? (
-                                wallet.commissionWalletBalance *
+                                totalCommissionIncomeCC *
                                 ccSettings.cashOutRatePHP
                               ).toLocaleString()
                             : '0'}
@@ -1787,19 +2234,26 @@ export default function AffiliateDashboard({
                           </div>
                         </div>
                         <div className='text-base font-black tracking-tight text-white mb-0.5'>
-                          {wallet
-                            ? wallet.rewardWalletBalance.toFixed(2)
-                            : '0.00'}{' '}
+                          {todaysEarningsCC.toLocaleString('en-PH', {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 4,
+                          })}{' '}
                           CC
                         </div>
                         <div className='text-[9px] text-zinc-400 font-mono'>
-                          ≈ ₱
-                          {wallet
-                            ? (wallet.rewardWalletBalance * 70).toLocaleString()
-                            : '0'}
+                          ≈{' '}
+                          {new Intl.NumberFormat('en-PH', {
+                            style: 'currency',
+                            currency: 'PHP',
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          }).format(
+                            todaysEarningsCC *
+                              (ccSettings?.cashOutRatePHP || 69),
+                          )}
                         </div>
                         <div className='mt-3 h-6 flex items-center justify-center text-[8px] text-zinc-500 uppercase tracking-wider border border-zinc-900 bg-zinc-950 rounded-lg'>
-                          Non-Withdrawable
+                          Credited Today • Manila Time
                         </div>
                       </div>
 
